@@ -13,7 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, FEATURED_SUBJECTS
+from app.main import app
+from app.config import FEATURED_SUBJECTS
 
 client = TestClient(app)
 
@@ -66,7 +67,7 @@ def _make_record(title="Test Book", edition_key="OL1M"):
 class TestOpdsHome:
     def test_returns_200(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ):
             resp = client.get("/opds")
@@ -74,7 +75,7 @@ class TestOpdsHome:
 
     def test_content_type(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ):
             resp = client.get("/opds")
@@ -82,7 +83,7 @@ class TestOpdsHome:
 
     def test_metadata_title(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ):
             resp = client.get("/opds")
@@ -91,7 +92,7 @@ class TestOpdsHome:
 
     def test_navigation_has_featured_subjects(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ):
             resp = client.get("/opds")
@@ -102,7 +103,7 @@ class TestOpdsHome:
 
     def test_groups_present(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ):
             resp = client.get("/opds")
@@ -111,7 +112,7 @@ class TestOpdsHome:
 
     def test_links_include_self_and_search(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ):
             resp = client.get("/opds")
@@ -129,7 +130,7 @@ class TestOpdsSearch:
     def test_returns_200(self):
         record = _make_record()
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(records=[record], total=1),
         ):
             resp = client.get("/opds/search?query=Python")
@@ -137,7 +138,7 @@ class TestOpdsSearch:
 
     def test_content_type(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ):
             resp = client.get("/opds/search")
@@ -145,7 +146,7 @@ class TestOpdsSearch:
 
     def test_metadata_title(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ):
             resp = client.get("/opds/search")
@@ -155,7 +156,7 @@ class TestOpdsSearch:
     def test_publications_in_response(self):
         record = _make_record(title="Python Cookbook")
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(records=[record], total=1),
         ):
             resp = client.get("/opds/search?query=Python")
@@ -166,7 +167,7 @@ class TestOpdsSearch:
     def test_pagination_params_forwarded(self):
         """Check that page/limit are forwarded to the provider."""
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(),
         ) as mock_search:
             client.get("/opds/search?query=test&page=2&limit=10")
@@ -191,7 +192,7 @@ class TestOpdsBooks:
     def test_returns_200_for_known_edition(self):
         record = _make_record(title="Moby-Dick", edition_key="OL7353617M")
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(records=[record], total=1),
         ):
             resp = client.get("/opds/books/OL7353617M")
@@ -200,7 +201,7 @@ class TestOpdsBooks:
     def test_content_type(self):
         record = _make_record()
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(records=[record], total=1),
         ):
             resp = client.get("/opds/books/OL1M")
@@ -208,7 +209,7 @@ class TestOpdsBooks:
 
     def test_returns_404_for_unknown_edition(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(records=[], total=0),
         ):
             resp = client.get("/opds/books/OL9999999M")
@@ -216,7 +217,7 @@ class TestOpdsBooks:
 
     def test_404_body_has_detail(self):
         with patch(
-            "app.main.OpenLibraryDataProvider.search",
+            "app.routes.opds.OpenLibraryDataProvider.search",
             return_value=_make_search_response(records=[], total=0),
         ):
             resp = client.get("/opds/books/OL9999999M")

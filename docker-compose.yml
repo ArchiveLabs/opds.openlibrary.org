@@ -1,6 +1,11 @@
 services:
   opds:
-    build: .
+    build:
+      context: ../
+      dockerfile: opds.openlibrary.org/docker/Dockerfile
     ports:
       - "8080:8080"
+    env_file:
+      - path: .env
+        required: false
     restart: unless-stopped

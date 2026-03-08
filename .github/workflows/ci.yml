@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install git+https://github.com/ArchiveLabs/pyopds2.git
+          pip install -r requirements.txt
+          pip install pytest pytest-cov httpx
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out opds.openlibrary.org
+        uses: actions/checkout@v4
+        with:
+          path: opds.openlibrary.org
+
+      - name: Check out pyopds2_openlibrary
+        uses: actions/checkout@v4
+        with:
+          repository: ArchiveLabs/pyopds2_openlibrary
+          path: pyopds2_openlibrary
+
+      - name: Build Docker image
+        run: docker build -f opds.openlibrary.org/docker/Dockerfile .
