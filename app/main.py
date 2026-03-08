@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -24,6 +25,15 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args and len(record.args) >= 3:
+            return record.args[2] not in ("/sw.js", "/static/favicon.ico")
+        return True
+
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 
 @app.exception_handler(EditionNotFound)
