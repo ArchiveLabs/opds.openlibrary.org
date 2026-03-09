@@ -66,4 +66,9 @@ def service_worker():
     return JSONResponse(content="", media_type="application/javascript")
 
 
+@app.get("/health", include_in_schema=False)
+def health():
+    return {"status": "ok"}
+
+
 app.include_router(opds_router)
