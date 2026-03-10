@@ -27,12 +27,6 @@ scripts/
 
 ## Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | Homepage catalog — featured subjects + curated shelves |
-| `GET` | `/search` | Search Open Library (`query`, `limit`, `page`, `sort`) |
-| `GET` | `/books/{edition_olid}` | Single edition record (e.g. `OL7353617M`) |
-
 Interactive docs: `/docs` (Swagger UI) · `/redoc`
 
 ---
@@ -41,6 +35,9 @@ Interactive docs: `/docs` (Swagger UI) · `/redoc`
 
 - [Docker](https://docs.docker.com/get-docker/) + [Docker Compose](https://docs.docker.com/compose/) — for the recommended Docker workflow
 - Python 3.12+ — only needed for local development without Docker
+
+Alternatively [Podman](https://podman.io/) can be used. In that case,
+aardvark-dns is required.
 
 ---
 
