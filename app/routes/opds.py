@@ -4,6 +4,7 @@ from typing import Optional
 import asyncio
 
 import httpx
+import requests as requests_lib
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -27,10 +28,27 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _base_url(request: Request) -> str:
     if OPDS_BASE_URL:
         return OPDS_BASE_URL.rstrip("/")
     return str(request.base_url).rstrip("/")
+
+
+def _common_links(base: str) -> list[Link]:
+    """Links shared across catalog responses (search template, shelf, profile)."""
+    return [
+        Link(rel="search", href=f"{base}/search{{?query}}", type=OPDS_MEDIA_TYPE, templated=True),
+        Link(rel="http://opds-spec.org/shelf",
+             href="https://archive.org/services/loans/loan/?action=user_bookshelf",
+             type=OPDS_MEDIA_TYPE),
+        Link(rel="profile",
+             href="https://archive.org/services/loans/loan/?action=user_profile",
+             type="application/opds-profile+json"),
+    ]
 
 
 def get_provider() -> OpenLibraryDataProvider:
@@ -49,23 +67,48 @@ def opds_pub_response(data: dict) -> JSONResponse:
     return JSONResponse(content=data, media_type=OPDS_PUB_MEDIA_TYPE)
 
 
+def _rewrite_pub_self_links(catalog: Catalog, base: str) -> None:
+    """Replace library-generated publication self links with this OPDS server's URLs."""
+    if catalog.publications:
+        for pub in catalog.publications:
+            _rewrite_publication_links(pub, base)
+    if catalog.groups:
+        for group in catalog.groups:
+            _rewrite_pub_self_links(group, base)
+
+
+def _rewrite_publication_links(pub, base: str) -> None:
+    """Rewrite a single publication's self link to point to this OPDS server."""
+    for link in pub.links:
+        if link.rel == "self":
+            olid = link.href.rstrip("/").split("/")[-1]
+            link.href = f"{base}/books/{olid}"
+
+
 def _search(provider: OpenLibraryDataProvider, **kwargs):
     try:
         logger.info("search query=%r limit=%s offset=%s sort=%s",
                     kwargs.get("query"), kwargs.get("limit"),
                     kwargs.get("offset", 0), kwargs.get("sort"))
         return provider.search(**kwargs)
-    except httpx.HTTPStatusError as exc:
-        logger.error("upstream HTTP error status=%s url=%s",
-                     exc.response.status_code, exc.request.url)
+    except (httpx.HTTPStatusError, requests_lib.exceptions.HTTPError) as exc:
+        response = exc.response
+        status_code = response.status_code if response is not None else 502
+        url = getattr(exc, "request", None)
+        url = url.url if url else "?"
+        logger.error("upstream HTTP error status=%s url=%s", status_code, url)
         raise UpstreamError(
-            f"OpenLibrary returned {exc.response.status_code}",
-            status_code=exc.response.status_code,
+            f"OpenLibrary returned {status_code}",
+            status_code=status_code,
         ) from exc
-    except httpx.RequestError as exc:
+    except (httpx.RequestError, requests_lib.exceptions.RequestException) as exc:
         logger.error("upstream request error: %s", exc)
         raise UpstreamError(f"Could not reach OpenLibrary: {exc}") from exc
 
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @router.get("/", summary="OPDS 2.0 homepage")
 async def opds_home(request: Request):
@@ -139,17 +182,12 @@ async def opds_home(request: Request):
         groups=loaded_groups,
         facets=None,
         links=[
-            Link(rel="self",   href=f"{base}/",               type=OPDS_MEDIA_TYPE),
-            Link(rel="start",  href=f"{base}/",               type=OPDS_MEDIA_TYPE),
-            Link(rel="search", href=f"{base}/search{{?query}}", type=OPDS_MEDIA_TYPE, templated=True),
-            Link(rel="http://opds-spec.org/shelf",
-                 href="https://archive.org/services/loans/loan/?action=user_bookshelf",
-                 type=OPDS_MEDIA_TYPE),
-            Link(rel="profile",
-                 href="https://archive.org/services/loans/loan/?action=user_profile",
-                 type="application/opds-profile+json"),
+            Link(rel="self",  href=f"{base}/", type=OPDS_MEDIA_TYPE),
+            Link(rel="start", href=f"{base}/", type=OPDS_MEDIA_TYPE),
+            *_common_links(base),
         ],
     )
+    _rewrite_pub_self_links(catalog, base)
     return opds_response(catalog.model_dump())
 
 
@@ -166,6 +204,8 @@ async def opds_search(
     base = _base_url(request)
     provider = get_provider()
 
+    self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
+
     catalog = Catalog.create(
         metadata=Metadata(title="Search Results"),
         response=await asyncio.to_thread(
@@ -178,16 +218,11 @@ async def opds_search(
             facets={"mode": mode},
         ),
         links=[
-            Link(rel="self",   href=str(request.url),                type=OPDS_MEDIA_TYPE),
-            Link(rel="search", href=f"{base}/search{{?query}}", type=OPDS_MEDIA_TYPE, templated=True),
-            Link(rel="http://opds-spec.org/shelf",
-                 href="https://archive.org/services/loans/loan/?action=user_bookshelf",
-                 type=OPDS_MEDIA_TYPE),
-            Link(rel="profile",
-                 href="https://archive.org/services/loans/loan/?action=user_profile",
-                 type="application/opds-profile+json"),
+            Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
+            *_common_links(base),
         ],
     )
+    _rewrite_pub_self_links(catalog, base)
     return opds_response(catalog.model_dump())
 
 
@@ -201,4 +236,5 @@ async def opds_books(request: Request, edition_olid: str):
         logger.warning("edition not found: %s", edition_olid)
         raise EditionNotFound(edition_olid)
     pub = resp.records[0].to_publication()
+    _rewrite_publication_links(pub, base)
     return opds_pub_response(pub.model_dump())
