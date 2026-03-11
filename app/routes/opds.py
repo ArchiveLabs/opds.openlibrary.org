@@ -51,7 +51,7 @@ def get_provider(base: str) -> OpenLibraryDataProvider:
     OpenLibraryDataProvider.OL_BASE_URL = OL_BASE_URL
     OpenLibraryDataProvider.USER_AGENT = OL_USER_AGENT
     OpenLibraryDataProvider.REQUEST_TIMEOUT = OL_REQUEST_TIMEOUT
-    OpenLibraryDataProvider.SEARCH_URL = "/search"
+    OpenLibraryDataProvider.SEARCH_URL = f"{base}/search"
     OpenLibraryDataProvider.OPDS_BASE_URL = base
     return OpenLibraryDataProvider()
 
@@ -146,7 +146,7 @@ async def opds_home(request: Request):
                 type=OPDS_MEDIA_TYPE,
                 title=subject["presentable_name"],
                 href=(
-                    f"{base}{search_url}?sort=trending"
+                    f"{search_url}?sort=trending"
                     f"&query=subject_key:{subject['key'].split('/')[-1]}"
                     f' -subject:"content_warning:cover"'
                     f" ebook_access:[borrowable TO *]"

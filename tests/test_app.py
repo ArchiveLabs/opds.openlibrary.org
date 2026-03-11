@@ -120,10 +120,12 @@ class TestOpdsHome:
         assert self_link["href"] == "https://example.com/opds/"
 
     def test_publication_self_links_use_opds_base(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as OLP
         record = _make_record(edition_key="OL99M")
         with patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             with patch("app.routes.opds.OPDS_BASE_URL", "https://myopds.example.com"):
-                data = client.get("/").json()
+                with patch.object(OLP, "OPDS_BASE_URL", "https://myopds.example.com", create=True):
+                    data = client.get("/").json()
         for group in data.get("groups", []):
             for pub in group.get("publications", []):
                 self_link = next(
@@ -204,13 +206,15 @@ class TestOpdsSearch:
         assert "query=hello" in self_link["href"]
 
     def test_publication_self_links_use_opds_base(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as OLP
         record = _make_record(edition_key="OL42M")
         with patch(
             SEARCH_PATCH_TARGET,
             return_value=_make_search_response(records=[record], total=1),
         ):
             with patch("app.routes.opds.OPDS_BASE_URL", "https://myopds.example.com"):
-                data = client.get("/search?query=test").json()
+                with patch.object(OLP, "OPDS_BASE_URL", "https://myopds.example.com", create=True):
+                    data = client.get("/search?query=test").json()
         pub_self = next(
             l for l in data["publications"][0]["links"] if l["rel"] == "self"
         )
@@ -252,13 +256,15 @@ class TestOpdsBooks:
         assert "detail" in data
 
     def test_self_link_uses_opds_base(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as OLP
         record = _make_record(edition_key="OL55M")
         with patch(
             SEARCH_PATCH_TARGET,
             return_value=_make_search_response(records=[record], total=1),
         ):
             with patch("app.routes.opds.OPDS_BASE_URL", "https://myopds.example.com"):
-                data = client.get("/books/OL55M").json()
+                with patch.object(OLP, "OPDS_BASE_URL", "https://myopds.example.com", create=True):
+                    data = client.get("/books/OL55M").json()
         self_link = next(l for l in data["links"] if l["rel"] == "self")
         assert self_link["href"] == "https://myopds.example.com/books/OL55M"
         assert "openlibrary.org" not in self_link["href"]
