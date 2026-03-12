@@ -9,7 +9,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from pyopds2 import Catalog, Link, Metadata, Navigation
-from pyopds2_openlibrary import OpenLibraryDataProvider
+from pyopds2_openlibrary import OpenLibraryDataProvider, build_facets
 
 from app.config import (
     FEATURED_SUBJECTS,
@@ -180,21 +180,29 @@ async def opds_search(
 
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
 
+    search_response = await asyncio.to_thread(
+        _search,
+        provider,
+        query=query,
+        limit=limit,
+        offset=(page - 1) * limit,
+        sort=sort,
+        facets={"mode": mode},
+    )
+
     catalog = Catalog.create(
         metadata=Metadata(title="Search Results"),
-        response=await asyncio.to_thread(
-            _search,
-            provider,
-            query=query,
-            limit=limit,
-            offset=(page - 1) * limit,
-            sort=sort,
-            facets={"mode": mode},
-        ),
+        response=search_response,
         links=[
             Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
             *_common_links(base),
         ],
+        facets=build_facets(
+            base_url=base,
+            query=query,
+            sort=sort,
+            mode=mode,
+        ),
     )
     return opds_response(catalog.model_dump())
 
