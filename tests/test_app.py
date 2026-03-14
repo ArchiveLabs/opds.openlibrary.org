@@ -294,6 +294,73 @@ class TestUpstreamErrors:
 
 
 # ---------------------------------------------------------------------------
+# Search modes
+# ---------------------------------------------------------------------------
+
+class TestSearchModes:
+    def test_ebooks_mode_forwarded(self, mock_empty_search):
+        client.get("/search?query=test&mode=ebooks")
+        mock_empty_search.assert_called_once_with(
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "ebooks"}
+        )
+
+    def test_open_access_mode_forwarded(self, mock_empty_search):
+        client.get("/search?query=test&mode=open_access")
+        mock_empty_search.assert_called_once_with(
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "open_access"}
+        )
+
+    def test_buyable_mode_forwarded(self, mock_empty_search):
+        client.get("/search?query=test&mode=buyable")
+        mock_empty_search.assert_called_once_with(
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "buyable"}
+        )
+
+
+# ---------------------------------------------------------------------------
+# Facets
+# ---------------------------------------------------------------------------
+
+class TestFacets:
+    def test_search_response_includes_facets(self, mock_empty_search):
+        data = client.get("/search?query=test").json()
+        assert "facets" in data
+        assert len(data["facets"]) == 2
+
+    def test_sort_facet_has_metadata_title(self, mock_empty_search):
+        data = client.get("/search?query=test").json()
+        sort_facet = data["facets"][0]
+        assert sort_facet["metadata"]["title"] == "Sort"
+
+    def test_availability_facet_has_metadata_title(self, mock_empty_search):
+        data = client.get("/search?query=test").json()
+        avail_facet = data["facets"][1]
+        assert avail_facet["metadata"]["title"] == "Availability"
+
+    def test_active_sort_facet_has_self_rel(self, mock_empty_search):
+        data = client.get("/search?query=test&sort=new").json()
+        sort_links = data["facets"][0]["links"]
+        new_link = next(l for l in sort_links if l["title"] == "Most Recent")
+        rel = new_link["rel"]
+        # Active sort link should include "self" and the semantic rel
+        assert "self" in rel
+        assert "http://opds-spec.org/sort/new" in rel
+
+    def test_active_availability_facet_has_self_rel(self, mock_empty_search):
+        data = client.get("/search?query=test&mode=ebooks").json()
+        avail_links = data["facets"][1]["links"]
+        ebooks_link = next(l for l in avail_links if l["title"] == "Available to Borrow")
+        assert ebooks_link["rel"] == "self"
+
+    def test_sort_facet_links_have_numberOfItems(self, mock_single_record):
+        data = client.get("/search?query=test").json()
+        sort_links = data["facets"][0]["links"]
+        for link in sort_links:
+            assert "properties" in link
+            assert "numberOfItems" in link["properties"]
+
+
+# ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 

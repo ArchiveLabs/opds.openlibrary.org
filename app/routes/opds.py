@@ -180,9 +180,8 @@ async def opds_search(
 
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
 
-    catalog = Catalog.create(
-        metadata=Metadata(title="Search Results"),
-        response=await asyncio.to_thread(
+    search_response, availability_counts = await asyncio.gather(
+        asyncio.to_thread(
             _search,
             provider,
             query=query,
@@ -191,10 +190,28 @@ async def opds_search(
             sort=sort,
             facets={"mode": mode},
         ),
+        asyncio.to_thread(OpenLibraryDataProvider.fetch_facet_counts, query),
+    )
+
+    # The main search already gives us the exact count for the active mode,
+    # so patch it in to avoid any mismatch.
+    availability_counts[mode] = search_response.total
+
+    catalog = Catalog.create(
+        metadata=Metadata(title="Search Results"),
+        response=search_response,
         links=[
             Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
             *_common_links(base),
         ],
+        facets=OpenLibraryDataProvider.build_facets(
+            base_url=base,
+            query=query,
+            sort=sort,
+            mode=mode,
+            total=search_response.total,
+            availability_counts=availability_counts,
+        ),
     )
     return opds_response(catalog.model_dump())
 
