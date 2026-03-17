@@ -3,3 +3,5 @@ uvicorn[standard]>=0.29.0
 git+https://github.com/ArchiveLabs/pyopds2.git@7b4242461d0c2cebf83728fda79e60cc63d0fab9
 git+https://github.com/ArchiveLabs/pyopds2_openlibrary.git@b69ac9857a74db9e21b1f9ff9807e45084310a86
 requests>=2.32.0
+httpx>=0.27.0
+sentry-sdk[fastapi]>=2.0.0

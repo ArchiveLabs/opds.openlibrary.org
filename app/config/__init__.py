@@ -14,6 +14,11 @@ OL_USER_AGENT: str = os.environ.get(
 )
 OL_REQUEST_TIMEOUT: float = float(os.environ.get("OL_REQUEST_TIMEOUT", "30.0"))
 
+SENTRY_DSN: str | None = os.environ.get("SENTRY_DSN")
+ENVIRONMENT: str = os.environ.get("ENVIRONMENT", "development")
+SENTRY_TRACES_SAMPLE_RATE: float = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
+SENTRY_PROFILE_SESSION_SAMPLE_RATE: float = float(os.environ.get("SENTRY_PROFILE_SESSION_SAMPLE_RATE", "0.1"))
+
 FEATURED_SUBJECTS: list[dict[str, str]] = [
     {"key": "/subjects/art",                           "presentable_name": "Art"},
     {"key": "/subjects/science_fiction",               "presentable_name": "Science Fiction"},
@@ -40,4 +45,8 @@ __all__ = [
     "OL_USER_AGENT",
     "OL_REQUEST_TIMEOUT",
     "FEATURED_SUBJECTS",
+    "SENTRY_DSN",
+    "ENVIRONMENT",
+    "SENTRY_TRACES_SAMPLE_RATE",
+    "SENTRY_PROFILE_SESSION_SAMPLE_RATE",
 ]

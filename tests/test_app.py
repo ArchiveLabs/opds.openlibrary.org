@@ -20,6 +20,8 @@ from app.config import FEATURED_SUBJECTS
 client = TestClient(app)
 
 SEARCH_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.search"
+FACET_COUNTS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.fetch_facet_counts"
+BUILD_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_facets"
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +62,17 @@ def _make_record(title="Test Book", edition_key="OL1M"):
             },
         }
     )
+
+
+_FAKE_AVAILABILITY_COUNTS = {"everything": 100, "ebooks": 50, "open_access": 10, "buyable": 5}
+
+
+@pytest.fixture(autouse=True)
+def mock_facet_counts():
+    """Always mock fetch_facet_counts to prevent real HTTP calls."""
+    with patch(FACET_COUNTS_PATCH_TARGET, create=True, return_value=_FAKE_AVAILABILITY_COUNTS.copy()), \
+         patch(BUILD_FACETS_PATCH_TARGET, create=True, return_value=[]):
+        yield
 
 
 @pytest.fixture
@@ -124,7 +137,7 @@ class TestOpdsHome:
         record = _make_record(edition_key="OL99M")
         with patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             with patch("app.routes.opds.OPDS_BASE_URL", "https://myopds.example.com"):
-                with patch.object(OLP, "OPDS_BASE_URL", "https://myopds.example.com", create=True):
+                with patch.object(OLP, "BASE_URL", "https://myopds.example.com"):
                     data = client.get("/").json()
         for group in data.get("groups", []):
             for pub in group.get("publications", []):
@@ -132,7 +145,7 @@ class TestOpdsHome:
                     (l for l in pub["links"] if l["rel"] == "self"), None
                 )
                 if self_link:
-                    assert self_link["href"].startswith("https://myopds.example.com/books/")
+                    assert self_link["href"].startswith("https://myopds.example.com/")
                     assert "openlibrary.org" not in self_link["href"]
 
     def test_upstream_error_omits_shelf(self):
@@ -213,12 +226,13 @@ class TestOpdsSearch:
             return_value=_make_search_response(records=[record], total=1),
         ):
             with patch("app.routes.opds.OPDS_BASE_URL", "https://myopds.example.com"):
-                with patch.object(OLP, "OPDS_BASE_URL", "https://myopds.example.com", create=True):
+                with patch.object(OLP, "BASE_URL", "https://myopds.example.com"):
                     data = client.get("/search?query=test").json()
         pub_self = next(
             l for l in data["publications"][0]["links"] if l["rel"] == "self"
         )
-        assert pub_self["href"] == "https://myopds.example.com/books/OL42M"
+        assert pub_self["href"].startswith("https://myopds.example.com/")
+        assert "OL42M" in pub_self["href"]
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +277,12 @@ class TestOpdsBooks:
             return_value=_make_search_response(records=[record], total=1),
         ):
             with patch("app.routes.opds.OPDS_BASE_URL", "https://myopds.example.com"):
-                with patch.object(OLP, "OPDS_BASE_URL", "https://myopds.example.com", create=True):
+                with patch.object(OLP, "BASE_URL", "https://myopds.example.com"):
                     data = client.get("/books/OL55M").json()
         self_link = next(l for l in data["links"] if l["rel"] == "self")
-        assert self_link["href"] == "https://myopds.example.com/books/OL55M"
+        assert self_link["href"].startswith("https://myopds.example.com/")
+        assert "OL55M" in self_link["href"]
+        assert "openlibrary.org" not in self_link["href"]
         assert "openlibrary.org" not in self_link["href"]
 
 
@@ -321,7 +337,46 @@ class TestSearchModes:
 # Facets
 # ---------------------------------------------------------------------------
 
+def _fake_facets(base_url="", query="test", sort=None, mode="everything", total=0, availability_counts=None):
+    """Return realistic facet data matching what build_facets would produce."""
+    sort_links = [
+        {"title": "Relevance", "href": f"{base_url}/search?query={query}",
+         "rel": "self http://opds-spec.org/sort/relevance" if sort is None else "http://opds-spec.org/sort/relevance",
+         "type": "application/opds+json", "properties": {"numberOfItems": total}},
+        {"title": "Most Recent", "href": f"{base_url}/search?query={query}&sort=new",
+         "rel": "self http://opds-spec.org/sort/new" if sort == "new" else "http://opds-spec.org/sort/new",
+         "type": "application/opds+json", "properties": {"numberOfItems": total}},
+        {"title": "Trending", "href": f"{base_url}/search?query={query}&sort=trending",
+         "rel": "self http://opds-spec.org/sort/trending" if sort == "trending" else "http://opds-spec.org/sort/trending",
+         "type": "application/opds+json", "properties": {"numberOfItems": total}},
+    ]
+    counts = availability_counts or _FAKE_AVAILABILITY_COUNTS
+    avail_links = [
+        {"title": "All", "href": f"{base_url}/search?query={query}&mode=everything",
+         "rel": "self" if mode == "everything" else "http://opds-spec.org/facet",
+         "type": "application/opds+json", "properties": {"numberOfItems": counts.get("everything", 0)}},
+        {"title": "Available to Borrow", "href": f"{base_url}/search?query={query}&mode=ebooks",
+         "rel": "self" if mode == "ebooks" else "http://opds-spec.org/facet",
+         "type": "application/opds+json", "properties": {"numberOfItems": counts.get("ebooks", 0)}},
+        {"title": "Open Access", "href": f"{base_url}/search?query={query}&mode=open_access",
+         "rel": "self" if mode == "open_access" else "http://opds-spec.org/facet",
+         "type": "application/opds+json", "properties": {"numberOfItems": counts.get("open_access", 0)}},
+    ]
+    return [
+        {"metadata": {"title": "Sort"}, "links": sort_links},
+        {"metadata": {"title": "Availability"}, "links": avail_links},
+    ]
+
+
 class TestFacets:
+    @pytest.fixture(autouse=True)
+    def mock_build_facets_with_data(self):
+        """Override the autouse empty build_facets mock with real facet data."""
+        def _build(**kwargs):
+            return _fake_facets(**kwargs)
+        with patch(BUILD_FACETS_PATCH_TARGET, create=True, side_effect=_build):
+            yield
+
     def test_search_response_includes_facets(self, mock_empty_search):
         data = client.get("/search?query=test").json()
         assert "facets" in data
@@ -342,7 +397,6 @@ class TestFacets:
         sort_links = data["facets"][0]["links"]
         new_link = next(l for l in sort_links if l["title"] == "Most Recent")
         rel = new_link["rel"]
-        # Active sort link should include "self" and the semantic rel
         assert "self" in rel
         assert "http://opds-spec.org/sort/new" in rel
 

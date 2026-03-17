@@ -7,16 +7,20 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.config import ENVIRONMENT
 from app.exceptions import EditionNotFound, UpstreamError
 from app.logger import get_logger
 from app.routes.opds import router as opds_router
+from app.sentry import init_sentry
 
 logger = get_logger(__name__)
+
+sentry_enabled = init_sentry()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    logger.info("OPDS service starting up")
+    logger.info("OPDS service starting up (sentry=%s)", sentry_enabled)
     yield
 
 
@@ -69,6 +73,12 @@ def service_worker():
 @app.get("/health", include_in_schema=False)
 def health():
     return {"status": "ok"}
+
+
+if ENVIRONMENT != "production":
+    @app.get("/sentry-debug", include_in_schema=False)
+    def sentry_debug():
+        1 / 0
 
 
 app.include_router(opds_router)
