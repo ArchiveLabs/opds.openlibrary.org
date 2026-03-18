@@ -1,0 +1,5 @@
+variables:
+  NOMAD_VAR_PORTS: '{ 8080 = "http" }'
+
+include:
+  - remote: 'https://nomad.archive.org/ci.yml'
