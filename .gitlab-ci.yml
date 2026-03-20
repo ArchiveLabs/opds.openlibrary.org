@@ -1,5 +1,6 @@
 variables:
   NOMAD_VAR_PORTS: '{ 8080 = "http" }'
+  NOMAD_VAR_CHECK_PATH: '/health'
 
 include:
   - remote: 'https://nomad.archive.org/ci.yml'
