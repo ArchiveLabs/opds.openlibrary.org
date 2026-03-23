@@ -10,7 +10,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 cat > "$ENV_FILE" << 'EOF'
-#OPDS_BASE_URL=https://opds.openlibrary.org
+OPDS_BASE_URL=https://openlibrary.org/opds
 OL_BASE_URL=https://openlibrary.org
 OL_USER_AGENT=OPDSBot/1.0 (opds.openlibrary.org; opds@openlibrary.org)
 OL_REQUEST_TIMEOUT=30.0
