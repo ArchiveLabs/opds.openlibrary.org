@@ -10,13 +10,15 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 cat > "$ENV_FILE" << 'EOF'
+# Set to "development" to use the request base URL instead (e.g. localhost)
+ENVIRONMENT=production
+
 OPDS_BASE_URL=https://openlibrary.org/opds
 OL_BASE_URL=https://openlibrary.org
 OL_USER_AGENT=OPDSBot/1.0 (opds.openlibrary.org; opds@openlibrary.org)
 OL_REQUEST_TIMEOUT=30.0
 
 SENTRY_DSN=https://8d8cab445edc9b4e452ba06d0be46dcb@sentry.archive.org/73
-ENVIRONMENT=development
 SENTRY_TRACES_SAMPLE_RATE=0.1
 SENTRY_PROFILE_SESSION_SAMPLE_RATE=0.1
 EOF
