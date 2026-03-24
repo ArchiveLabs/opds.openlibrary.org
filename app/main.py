@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import logging
+import os
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.config import ENVIRONMENT
 from app.exceptions import EditionNotFound, UpstreamError
 from app.logger import get_logger
 from app.routes.opds import router as opds_router
@@ -75,10 +75,12 @@ def health():
     return {"status": "ok"}
 
 
-if ENVIRONMENT != "production":
-    @app.get("/sentry-debug", include_in_schema=False)
-    def sentry_debug():
-        1 / 0
+@app.get("/sentry-debug", include_in_schema=False)
+def sentry_debug():
+    # Evaluate env at request time so tests and CI overrides are honored.
+    if os.getenv("ENVIRONMENT", "development") == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
+    1 / 0
 
 
 app.include_router(opds_router)
