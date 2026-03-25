@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 import asyncio
+import time
 
 import httpx
 import requests as requests_lib
@@ -26,6 +27,9 @@ from app.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+_home_cache: dict[str, tuple[float, dict]] = {}
+HOME_CACHE_TTL = 3 * 60 * 60  # 3 hours
 
 
 def _base_url(request: Request) -> str:
@@ -89,6 +93,12 @@ def _search(provider: OpenLibraryDataProvider, **kwargs):
 async def opds_home(request: Request):
     logger.info("GET / client=%s", request.client)
     base = _base_url(request)
+
+    cached = _home_cache.get(base)
+    if cached and (time.monotonic() - cached[0]) < HOME_CACHE_TTL:
+        logger.info("serving cached homepage for base=%s", base)
+        return opds_response(cached[1])
+
     provider = get_provider(base)
     search_url = OpenLibraryDataProvider.SEARCH_URL
 
@@ -162,7 +172,9 @@ async def opds_home(request: Request):
             *_common_links(base),
         ],
     )
-    return opds_response(catalog.model_dump())
+    data = catalog.model_dump()
+    _home_cache[base] = (time.monotonic(), data)
+    return opds_response(data)
 
 
 @router.get("/search", summary="OPDS 2.0 search")

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.config import FEATURED_SUBJECTS
+from app.routes import opds as opds_module
 
 client = TestClient(app)
 
@@ -65,6 +66,14 @@ def _make_record(title="Test Book", edition_key="OL1M"):
 
 
 _FAKE_AVAILABILITY_COUNTS = {"everything": 100, "ebooks": 50, "open_access": 10, "buyable": 5}
+
+
+@pytest.fixture(autouse=True)
+def clear_home_cache():
+    """Clear the homepage cache between tests."""
+    opds_module._home_cache.clear()
+    yield
+    opds_module._home_cache.clear()
 
 
 @pytest.fixture(autouse=True)
