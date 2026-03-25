@@ -178,6 +178,17 @@ class TestOpdsSearch:
         resp = client.get("/search?query=Python")
         assert resp.status_code == 200
 
+    def test_total_none_does_not_crash(self):
+        record = _make_record(title="Python Cookbook")
+        with patch(
+            SEARCH_PATCH_TARGET,
+            return_value=_make_search_response(records=[record], total=None),
+        ):
+            resp = client.get("/search?query=Python&mode=buyable")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data.get("publications", [])) == 1
+
     def test_content_type(self, mock_empty_search):
         resp = client.get("/search")
         assert "application/opds+json" in resp.headers["content-type"]

@@ -28,6 +28,13 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+def _safe_total(value: object) -> int:
+    """Return a non-negative integer total for pagination safety."""
+    if isinstance(value, int) and value >= 0:
+        return value
+    return 0
+
+
 def _base_url(request: Request) -> str:
     if OPDS_BASE_URL:
         return OPDS_BASE_URL.rstrip("/")
@@ -193,9 +200,14 @@ async def opds_search(
         asyncio.to_thread(OpenLibraryDataProvider.fetch_facet_counts, query),
     )
 
+    safe_total = _safe_total(getattr(search_response, "total", None))
+    if safe_total != getattr(search_response, "total", None):
+        logger.warning("search response returned invalid total=%r; defaulting to 0", getattr(search_response, "total", None))
+    search_response.total = safe_total
+
     # The main search already gives us the exact count for the active mode,
     # so patch it in to avoid any mismatch.
-    availability_counts[mode] = search_response.total
+    availability_counts[mode] = safe_total
 
     catalog = Catalog.create(
         metadata=Metadata(title="Search Results"),
@@ -209,7 +221,7 @@ async def opds_search(
             query=query,
             sort=sort,
             mode=mode,
-            total=search_response.total,
+            total=safe_total,
             availability_counts=availability_counts,
         ),
     )
