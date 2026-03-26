@@ -23,6 +23,7 @@ client = TestClient(app)
 SEARCH_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.search"
 FACET_COUNTS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.fetch_facet_counts"
 BUILD_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_facets"
+BUILD_HOME_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_home_facets"
 
 
 # ---------------------------------------------------------------------------
@@ -78,9 +79,10 @@ def clear_home_cache():
 
 @pytest.fixture(autouse=True)
 def mock_facet_counts():
-    """Always mock fetch_facet_counts to prevent real HTTP calls."""
+    """Always mock fetch_facet_counts and facet builders to prevent real HTTP calls."""
     with patch(FACET_COUNTS_PATCH_TARGET, create=True, return_value=_FAKE_AVAILABILITY_COUNTS.copy()), \
-         patch(BUILD_FACETS_PATCH_TARGET, create=True, return_value=[]):
+         patch(BUILD_FACETS_PATCH_TARGET, create=True, return_value=[]), \
+         patch(BUILD_HOME_FACETS_PATCH_TARGET, create=True, return_value=[]):
         yield
 
 
@@ -119,15 +121,27 @@ class TestOpdsHome:
         data = client.get("/").json()
         assert data["metadata"]["title"] == "Open Library"
 
-    def test_navigation_has_featured_subjects(self, mock_empty_search):
+    def test_navigation_has_featured_subjects(self, mock_single_record):
+        """Navigation only appears when groups have publications."""
         data = client.get("/").json()
         nav_titles = {n["title"] for n in data.get("navigation", [])}
         for subject in FEATURED_SUBJECTS:
             assert subject["presentable_name"] in nav_titles
 
-    def test_groups_present(self, mock_empty_search):
+    def test_groups_present(self, mock_single_record):
+        """Groups with publications are included; empty groups are filtered."""
         data = client.get("/").json()
         assert len(data.get("groups", [])) == 6
+
+    def test_empty_groups_filtered(self, mock_empty_search):
+        """When search returns no records, groups are filtered out."""
+        data = client.get("/").json()
+        assert len(data.get("groups", [])) == 0
+
+    def test_navigation_hidden_when_no_groups(self, mock_empty_search):
+        """Navigation is hidden when there are no loaded groups."""
+        data = client.get("/").json()
+        assert data.get("navigation", []) == []
 
     def test_links_include_self_and_search(self, mock_empty_search):
         data = client.get("/").json()
@@ -160,6 +174,7 @@ class TestOpdsHome:
     def test_upstream_error_omits_shelf(self):
         """If one shelf fails upstream, the rest still load."""
         call_count = 0
+        record = _make_record()
 
         def flaky_search(**kwargs):
             nonlocal call_count
@@ -169,7 +184,7 @@ class TestOpdsHome:
                     "500 Server Error",
                     response=MagicMock(status_code=500),
                 )
-            return _make_search_response()
+            return _make_search_response(records=[record], total=1)
 
         with patch(SEARCH_PATCH_TARGET, side_effect=flaky_search):
             resp = client.get("/")
@@ -219,7 +234,8 @@ class TestOpdsSearch:
     def test_pagination_params_forwarded(self, mock_empty_search):
         client.get("/search?query=test&page=2&limit=10")
         mock_empty_search.assert_called_once_with(
-            query="test", limit=10, offset=10, sort=None, facets={"mode": "everything"}
+            query="test", limit=10, offset=10, sort=None, facets={"mode": "everything"},
+            language="eng", title=None,
         )
 
     def test_invalid_limit_rejected(self):
@@ -337,19 +353,22 @@ class TestSearchModes:
     def test_ebooks_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=ebooks")
         mock_empty_search.assert_called_once_with(
-            query="test", limit=25, offset=0, sort=None, facets={"mode": "ebooks"}
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "ebooks"},
+            language="eng", title=None,
         )
 
     def test_open_access_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=open_access")
         mock_empty_search.assert_called_once_with(
-            query="test", limit=25, offset=0, sort=None, facets={"mode": "open_access"}
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "open_access"},
+            language="eng", title=None,
         )
 
     def test_buyable_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=buyable")
         mock_empty_search.assert_called_once_with(
-            query="test", limit=25, offset=0, sort=None, facets={"mode": "buyable"}
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "buyable"},
+            language="eng", title=None,
         )
 
 

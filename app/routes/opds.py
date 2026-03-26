@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from urllib.parse import urlencode
 import asyncio
 import time
 
@@ -97,7 +98,10 @@ def _search(provider: OpenLibraryDataProvider, **kwargs):
 
 
 @router.get("/", summary="OPDS 2.0 homepage")
-async def opds_home(request: Request):
+async def opds_home(
+    request: Request,
+    mode: str = Query(default="everything", description="Availability filter: everything, ebooks, open_access, buyable"),
+):
     logger.info("GET / client=%s", request.client)
     base = _base_url(request)
 
@@ -144,7 +148,10 @@ async def opds_home(request: Request):
 
     async def fetch_group(title: str, q: str, sort: str):
         try:
-            resp = await asyncio.to_thread(_search, provider, query=q, sort=sort, limit=25)
+            resp = await asyncio.to_thread(
+                _search, provider, query=q, sort=sort, limit=25,
+                language="eng", facets={"mode": mode}, title=title,
+            )
             return Catalog.create(metadata=Metadata(title=title), response=resp)
         except UpstreamError as exc:
             logger.warning("Omitting shelf %r due to upstream error: %s", title, exc)
@@ -153,28 +160,40 @@ async def opds_home(request: Request):
     results = await asyncio.gather(
         *(fetch_group(title, q, sort) for title, q, sort in groups_config)
     )
-    loaded_groups = [g for g in results if g is not None]
+    loaded_groups = [
+        g for g in results
+        if g is not None and g.publications
+    ]
+
+    navigation = [
+        Navigation(
+            type=OPDS_MEDIA_TYPE,
+            title=subject["presentable_name"],
+            href=f"{search_url}?{urlencode({
+                'sort': 'trending',
+                'title': subject['presentable_name'],
+                'query': (
+                    f'subject_key:{subject["key"].split("/")[-1]}'
+                    f' -subject:"content_warning:cover"'
+                    f' ebook_access:[borrowable TO *]'
+                ),
+            })}",
+        )
+        for subject in FEATURED_SUBJECTS
+    ] if loaded_groups else []
 
     catalog = Catalog(
         metadata=Metadata(title="Open Library"),
         publications=[],
-        navigation=[
-            Navigation(
-                type=OPDS_MEDIA_TYPE,
-                title=subject["presentable_name"],
-                href=(
-                    f"{search_url}?sort=trending"
-                    f"&query=subject_key:{subject['key'].split('/')[-1]}"
-                    f' -subject:"content_warning:cover"'
-                    f" ebook_access:[borrowable TO *]"
-                ),
-            )
-            for subject in FEATURED_SUBJECTS
-        ],
+        navigation=navigation,
         groups=loaded_groups,
-        facets=None,
+        facets=OpenLibraryDataProvider.build_home_facets(base, mode),
         links=[
-            Link(rel="self",  href=f"{base}/", type=OPDS_MEDIA_TYPE),
+            Link(
+                rel="self",
+                href=f"{base}/" if mode == "everything" else f"{base}/?mode={mode}",
+                type=OPDS_MEDIA_TYPE,
+            ),
             Link(rel="start", href=f"{base}/", type=OPDS_MEDIA_TYPE),
             *_common_links(base),
         ],
@@ -192,6 +211,7 @@ async def opds_search(
     page: int = Query(default=1, ge=1),
     sort: Optional[str] = Query(default=None),
     mode: str = Query(default="everything", description="Search mode, e.g. 'ebooks' or 'everything'"),
+    title: Optional[str] = Query(default=None, description="Display title for the results page"),
 ):
     logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s", query, limit, page, sort, mode)
     base = _base_url(request)
@@ -208,6 +228,8 @@ async def opds_search(
             offset=(page - 1) * limit,
             sort=sort,
             facets={"mode": mode},
+            language="eng",
+            title=title,
         ),
         asyncio.to_thread(OpenLibraryDataProvider.fetch_facet_counts, query),
     )
@@ -222,7 +244,7 @@ async def opds_search(
     availability_counts[mode] = safe_total
 
     catalog = Catalog.create(
-        metadata=Metadata(title="Search Results"),
+        metadata=Metadata(title=title or "Search Results"),
         response=search_response,
         links=[
             Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
@@ -245,7 +267,7 @@ async def opds_books(request: Request, edition_olid: str):
     logger.info("GET /books/%s", edition_olid)
     base = _base_url(request)
     provider = get_provider(base)
-    resp = await asyncio.to_thread(_search, provider, query=f"edition_key:{edition_olid}")
+    resp = await asyncio.to_thread(_search, provider, query=f"edition_key:{edition_olid}", language="eng")
     if not resp.records:
         logger.warning("edition not found: %s", edition_olid)
         raise EditionNotFound(edition_olid)
