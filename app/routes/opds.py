@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 _home_cache: dict[str, tuple[float, dict]] = {}
-HOME_CACHE_TTL = 3 * 60 * 60  # 3 hours
+HOME_CACHE_TTL = 1 * 60 * 60  # 1 hours
 
 
 def _base_url(request: Request) -> str:
