@@ -14,6 +14,7 @@ from pyopds2 import Catalog, Link, Metadata, Navigation
 from pyopds2_openlibrary import OpenLibraryDataProvider
 
 from app.config import (
+    ENVIRONMENT,
     FEATURED_SUBJECTS,
     OL_BASE_URL,
     OL_REQUEST_TIMEOUT,
@@ -106,7 +107,7 @@ async def opds_home(
     base = _base_url(request)
 
     cached = _home_cache.get(base)
-    if not request.url.query and cached and (time.monotonic() - cached[0]) < HOME_CACHE_TTL:
+    if ENVIRONMENT != "development" and not request.url.query and cached and (time.monotonic() - cached[0]) < HOME_CACHE_TTL:
         logger.info("serving cached homepage for base=%s", base)
         return opds_response(cached[1])
 
@@ -199,7 +200,7 @@ async def opds_home(
         ],
     )
     data = catalog.model_dump()
-    if not request.url.query:
+    if ENVIRONMENT != "development" and not request.url.query:
         _home_cache[base] = (time.monotonic(), data)
     return opds_response(data)
 

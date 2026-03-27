@@ -454,6 +454,50 @@ class TestFacets:
 
 
 # ---------------------------------------------------------------------------
+# Cache dev-mode bypass
+# ---------------------------------------------------------------------------
+
+class TestHomeCacheDevMode:
+    def test_cache_is_populated_in_production(self, mock_empty_search):
+        """Homepage response is cached in production mode."""
+        with patch("app.routes.opds.ENVIRONMENT", "production"):
+            client.get("/")
+        assert len(opds_module._home_cache) == 1
+
+    def test_cache_is_not_populated_in_development(self, mock_empty_search):
+        """Homepage response is NOT cached in development mode."""
+        with patch("app.routes.opds.ENVIRONMENT", "development"):
+            client.get("/")
+        assert len(opds_module._home_cache) == 0
+
+    def test_cache_is_not_served_in_development(self, mock_empty_search):
+        """Cached entry is ignored when ENVIRONMENT=development."""
+        # Pre-populate the cache manually
+        opds_module._home_cache["http://testserver"] = (
+            float("inf"),
+            {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []},
+        )
+        with patch("app.routes.opds.ENVIRONMENT", "development"), \
+             patch("app.routes.opds.OPDS_BASE_URL", None):
+            resp = client.get("/")
+        # Should have hit the real handler, not returned the stale cache entry
+        assert resp.status_code == 200
+        assert mock_empty_search.called
+
+    def test_cache_is_served_in_production(self, mock_empty_search):
+        """Cached entry IS served when ENVIRONMENT=production."""
+        opds_module._home_cache["http://testserver"] = (
+            float("inf"),
+            {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []},
+        )
+        with patch("app.routes.opds.ENVIRONMENT", "production"), \
+             patch("app.routes.opds.OPDS_BASE_URL", None):
+            resp = client.get("/")
+        assert resp.status_code == 200
+        assert not mock_empty_search.called
+
+
+# ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 
