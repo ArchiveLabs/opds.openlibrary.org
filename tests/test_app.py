@@ -8,10 +8,10 @@ Network calls to openlibrary.org are mocked so tests run offline.
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
+import httpx
 import pytest
-import requests as requests_lib
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -175,14 +175,16 @@ class TestOpdsHome:
         """If one shelf fails upstream, the rest still load."""
         call_count = 0
         record = _make_record()
+        _req = httpx.Request("GET", "https://openlibrary.org/search.json")
 
         def flaky_search(**kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise requests_lib.exceptions.HTTPError(
+                raise httpx.HTTPStatusError(
                     "500 Server Error",
-                    response=MagicMock(status_code=500),
+                    request=_req,
+                    response=httpx.Response(500, request=_req),
                 )
             return _make_search_response(records=[record], total=1)
 
@@ -235,7 +237,7 @@ class TestOpdsSearch:
         client.get("/search?query=test&page=2&limit=10")
         mock_empty_search.assert_called_once_with(
             query="test", limit=10, offset=10, sort=None, facets={"mode": "everything"},
-            language="eng", title=None,
+            language="en", title=None,
         )
 
     def test_invalid_limit_rejected(self):
@@ -319,7 +321,6 @@ class TestOpdsBooks:
         assert self_link["href"].startswith("https://myopds.example.com/")
         assert "OL55M" in self_link["href"]
         assert "openlibrary.org" not in self_link["href"]
-        assert "openlibrary.org" not in self_link["href"]
 
 
 # ---------------------------------------------------------------------------
@@ -327,19 +328,20 @@ class TestOpdsBooks:
 # ---------------------------------------------------------------------------
 
 class TestUpstreamErrors:
-    def test_requests_http_error_returns_502(self):
-        mock_response = MagicMock(status_code=500)
-        mock_request = MagicMock()
-        mock_request.url = "https://openlibrary.org/search.json"
-        exc = requests_lib.exceptions.HTTPError(
-            "500 Server Error", response=mock_response, request=mock_request
+    def test_httpx_http_status_error_returns_502(self):
+        _req = httpx.Request("GET", "https://openlibrary.org/search.json")
+        exc = httpx.HTTPStatusError(
+            "500 Server Error",
+            request=_req,
+            response=httpx.Response(500, request=_req),
         )
         with patch(SEARCH_PATCH_TARGET, side_effect=exc):
             resp = client.get("/search?query=test")
         assert resp.status_code == 502
 
-    def test_requests_connection_error_returns_502(self):
-        exc = requests_lib.exceptions.ConnectionError("Connection refused")
+    def test_httpx_request_error_returns_502(self):
+        _req = httpx.Request("GET", "https://openlibrary.org/search.json")
+        exc = httpx.ConnectError("Connection refused", request=_req)
         with patch(SEARCH_PATCH_TARGET, side_effect=exc):
             resp = client.get("/search?query=test")
         assert resp.status_code == 502
@@ -354,55 +356,51 @@ class TestSearchModes:
         client.get("/search?query=test&mode=ebooks")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "ebooks"},
-            language="eng", title=None,
+            language="en", title=None,
         )
 
     def test_open_access_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=open_access")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "open_access"},
-            language="eng", title=None,
+            language="en", title=None,
         )
 
     def test_buyable_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=buyable")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "buyable"},
-            language="eng", title=None,
+            language="en", title=None,
         )
+
 
 
 # ---------------------------------------------------------------------------
 # Facets
 # ---------------------------------------------------------------------------
 
-def _fake_facets(base_url="", query="test", sort=None, mode="everything", total=0, availability_counts=None):
-    """Return realistic facet data matching what build_facets would produce."""
-    sort_links = [
-        {"title": "Relevance", "href": f"{base_url}/search?query={query}",
-         "rel": "self http://opds-spec.org/sort/relevance" if sort is None else "http://opds-spec.org/sort/relevance",
-         "type": "application/opds+json", "properties": {"numberOfItems": total}},
-        {"title": "Most Recent", "href": f"{base_url}/search?query={query}&sort=new",
-         "rel": "self http://opds-spec.org/sort/new" if sort == "new" else "http://opds-spec.org/sort/new",
-         "type": "application/opds+json", "properties": {"numberOfItems": total}},
-        {"title": "Trending", "href": f"{base_url}/search?query={query}&sort=trending",
-         "rel": "self http://opds-spec.org/sort/trending" if sort == "trending" else "http://opds-spec.org/sort/trending",
-         "type": "application/opds+json", "properties": {"numberOfItems": total}},
-    ]
+def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, total=0, availability_counts=None):
+    """Return realistic facet data matching what build_facets now produces (Availability only).
+
+    Only the active mode link carries rel="self"; non-active links have no rel key,
+    matching the real _build_availability_links output.
+    """
     counts = availability_counts or _FAKE_AVAILABILITY_COUNTS
+
+    def _avail_link(mode_val, title, href):
+        link = {"title": title, "href": href, "type": "application/opds+json",
+                "properties": {"numberOfItems": counts.get(mode_val, 0)}}
+        if mode_val == mode:
+            link["rel"] = "self"
+        return link
+
     avail_links = [
-        {"title": "All", "href": f"{base_url}/search?query={query}&mode=everything",
-         "rel": "self" if mode == "everything" else "http://opds-spec.org/facet",
-         "type": "application/opds+json", "properties": {"numberOfItems": counts.get("everything", 0)}},
-        {"title": "Available to Borrow", "href": f"{base_url}/search?query={query}&mode=ebooks",
-         "rel": "self" if mode == "ebooks" else "http://opds-spec.org/facet",
-         "type": "application/opds+json", "properties": {"numberOfItems": counts.get("ebooks", 0)}},
-        {"title": "Open Access", "href": f"{base_url}/search?query={query}&mode=open_access",
-         "rel": "self" if mode == "open_access" else "http://opds-spec.org/facet",
-         "type": "application/opds+json", "properties": {"numberOfItems": counts.get("open_access", 0)}},
+        _avail_link("everything",  "Everything",            f"{base_url}/search?query={query}"),
+        _avail_link("ebooks",      "Available to Borrow",   f"{base_url}/search?query={query}&mode=ebooks"),
+        _avail_link("open_access", "Open Access",           f"{base_url}/search?query={query}&mode=open_access"),
+        _avail_link("buyable",     "Available to Purchase", f"{base_url}/search?query={query}&mode=buyable"),
     ]
     return [
-        {"metadata": {"title": "Sort"}, "links": sort_links},
         {"metadata": {"title": "Availability"}, "links": avail_links},
     ]
 
@@ -419,38 +417,31 @@ class TestFacets:
     def test_search_response_includes_facets(self, mock_empty_search):
         data = client.get("/search?query=test").json()
         assert "facets" in data
-        assert len(data["facets"]) == 2
-
-    def test_sort_facet_has_metadata_title(self, mock_empty_search):
-        data = client.get("/search?query=test").json()
-        sort_facet = data["facets"][0]
-        assert sort_facet["metadata"]["title"] == "Sort"
+        assert len(data["facets"]) == 1
 
     def test_availability_facet_has_metadata_title(self, mock_empty_search):
         data = client.get("/search?query=test").json()
-        avail_facet = data["facets"][1]
+        avail_facet = data["facets"][0]
         assert avail_facet["metadata"]["title"] == "Availability"
 
-    def test_active_sort_facet_has_self_rel(self, mock_empty_search):
-        data = client.get("/search?query=test&sort=new").json()
-        sort_links = data["facets"][0]["links"]
-        new_link = next(l for l in sort_links if l["title"] == "Most Recent")
-        rel = new_link["rel"]
-        assert "self" in rel
-        assert "http://opds-spec.org/sort/new" in rel
+    def test_no_sort_facet_in_response(self, mock_empty_search):
+        data = client.get("/search?query=test").json()
+        titles = [f["metadata"]["title"] for f in data["facets"]]
+        assert "Sort" not in titles
 
     def test_active_availability_facet_has_self_rel(self, mock_empty_search):
         data = client.get("/search?query=test&mode=ebooks").json()
-        avail_links = data["facets"][1]["links"]
+        avail_links = data["facets"][0]["links"]
         ebooks_link = next(l for l in avail_links if l["title"] == "Available to Borrow")
         assert ebooks_link["rel"] == "self"
 
-    def test_sort_facet_links_have_numberOfItems(self, mock_single_record):
+    def test_availability_labels_match_canonical(self, mock_empty_search):
         data = client.get("/search?query=test").json()
-        sort_links = data["facets"][0]["links"]
-        for link in sort_links:
-            assert "properties" in link
-            assert "numberOfItems" in link["properties"]
+        titles = {l["title"] for l in data["facets"][0]["links"]}
+        assert "Everything" in titles
+        assert "Available to Borrow" in titles
+        assert "Open Access" in titles
+        assert "Available to Purchase" in titles
 
 
 # ---------------------------------------------------------------------------

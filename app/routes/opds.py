@@ -6,7 +6,6 @@ import asyncio
 import time
 
 import httpx
-import requests as requests_lib
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -83,17 +82,14 @@ def _search(provider: OpenLibraryDataProvider, **kwargs):
                     kwargs.get("query"), kwargs.get("limit"),
                     kwargs.get("offset", 0), kwargs.get("sort"))
         return provider.search(**kwargs)
-    except (httpx.HTTPStatusError, requests_lib.exceptions.HTTPError) as exc:
-        response = exc.response
-        status_code = response.status_code if response is not None else 502
-        url = getattr(exc, "request", None)
-        url = url.url if url else "?"
-        logger.error("upstream HTTP error status=%s url=%s", status_code, url)
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        logger.error("upstream HTTP error status=%s url=%s", status_code, exc.request.url)
         raise UpstreamError(
             f"OpenLibrary returned {status_code}",
             status_code=status_code,
         ) from exc
-    except (httpx.RequestError, requests_lib.exceptions.RequestException) as exc:
+    except httpx.RequestError as exc:
         logger.error("upstream request error: %s", exc)
         raise UpstreamError(f"Could not reach OpenLibrary: {exc}") from exc
 
@@ -106,18 +102,25 @@ async def opds_home(
     logger.info("GET / client=%s", request.client)
     base = _base_url(request)
 
+    # Treat /?mode=everything as equivalent to / for caching purposes.
+    is_default_mode = not request.url.query or request.url.query == "mode=everything"
     cached = _home_cache.get(base)
-    if ENVIRONMENT != "development" and not request.url.query and cached and (time.monotonic() - cached[0]) < HOME_CACHE_TTL:
+    if ENVIRONMENT != "development" and is_default_mode and cached and (time.monotonic() - cached[0]) < HOME_CACHE_TTL:
         logger.info("serving cached homepage for base=%s", base)
         return opds_response(cached[1])
 
     provider = get_provider(base)
     search_url = OpenLibraryDataProvider.SEARCH_URL
 
+    # Mode-aware ebook_access filter for group queries.
+    # open_access uses ebook_access:public so groups populate with Standard Ebooks,
+    # Project Gutenberg, etc. All other modes use the borrowable range.
+    ea = "ebook_access:public" if mode == "open_access" else "ebook_access:[borrowable TO *]"
+
     groups_config = [
         (
             "Trending Books",
-            'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" ebook_access:[borrowable TO *] readinglog_count:[4 TO *]',
+            f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {ea} readinglog_count:[4 TO *]',
             "trending",
         ),
         (
@@ -127,22 +130,22 @@ async def opds_home(
         ),
         (
             "Romance",
-            'subject:romance ebook_access:[borrowable TO *] first_publish_year:[1930 TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
+            f'subject:romance {ea} first_publish_year:[1930 TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
             "trending,trending_score_hourly_sum",
         ),
         (
             "Kids",
-            'ebook_access:[borrowable TO *] trending_score_hourly_sum:[1 TO *] (subject_key:(juvenile_audience OR children\'s_fiction OR juvenile_nonfiction OR juvenile_encyclopedias OR juvenile_riddles OR juvenile_poetry OR juvenile_wit_and_humor OR juvenile_limericks OR juvenile_dictionaries OR juvenile_non-fiction) OR subject:("Juvenile literature" OR "Juvenile fiction" OR "pour la jeunesse" OR "pour enfants"))',
+            f'{ea} trending_score_hourly_sum:[1 TO *] (subject_key:(juvenile_audience OR children\'s_fiction OR juvenile_nonfiction OR juvenile_encyclopedias OR juvenile_riddles OR juvenile_poetry OR juvenile_wit_and_humor OR juvenile_limericks OR juvenile_dictionaries OR juvenile_non-fiction) OR subject:("Juvenile literature" OR "Juvenile fiction" OR "pour la jeunesse" OR "pour enfants"))',
             "random.hourly",
         ),
         (
             "Thrillers",
-            'subject:thrillers ebook_access:[borrowable TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
+            f'subject:thrillers {ea} trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
             "trending,trending_score_hourly_sum",
         ),
         (
             "Textbooks",
-            'subject_key:textbooks publish_year:[1990 TO *] ebook_access:[borrowable TO *]',
+            f'subject_key:textbooks publish_year:[1990 TO *] {ea}',
             "trending",
         ),
     ]
@@ -151,7 +154,7 @@ async def opds_home(
         try:
             resp = await asyncio.to_thread(
                 _search, provider, query=q, sort=sort, limit=25,
-                language="eng", facets={"mode": mode}, title=title,
+                language="en", facets={"mode": mode}, title=title,
             )
             return Catalog.create(metadata=Metadata(title=title), response=resp)
         except UpstreamError as exc:
@@ -173,6 +176,7 @@ async def opds_home(
             href=f"{search_url}?{urlencode({
                 'sort': 'trending',
                 'title': subject['presentable_name'],
+                'language': 'en',
                 'query': (
                     f'subject_key:{subject["key"].split("/")[-1]}'
                     f' -subject:"content_warning:cover"'
@@ -200,7 +204,7 @@ async def opds_home(
         ],
     )
     data = catalog.model_dump()
-    if ENVIRONMENT != "development" and not request.url.query:
+    if ENVIRONMENT != "development" and is_default_mode:
         _home_cache[base] = (time.monotonic(), data)
     return opds_response(data)
 
@@ -214,12 +218,20 @@ async def opds_search(
     sort: Optional[str] = Query(default=None),
     mode: str = Query(default="everything", description="Search mode, e.g. 'ebooks' or 'everything'"),
     title: Optional[str] = Query(default=None, description="Display title for the results page"),
+    language: str = Query(default="en", description="Language code to prefer (e.g. 'en', 'fr')"),
 ):
-    logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s", query, limit, page, sort, mode)
+    logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s language=%s", query, limit, page, sort, mode, language)
     base = _base_url(request)
     provider = get_provider(base)
 
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
+
+    def _fetch_facet_counts_safe(q: str) -> dict:
+        try:
+            return OpenLibraryDataProvider.fetch_facet_counts(q)
+        except Exception as exc:
+            logger.warning("facet count fetch failed, omitting counts: %s", exc)
+            return {}
 
     search_response, availability_counts = await asyncio.gather(
         asyncio.to_thread(
@@ -230,10 +242,10 @@ async def opds_search(
             offset=(page - 1) * limit,
             sort=sort,
             facets={"mode": mode},
-            language="eng",
+            language=language,
             title=title,
         ),
-        asyncio.to_thread(OpenLibraryDataProvider.fetch_facet_counts, query),
+        asyncio.to_thread(_fetch_facet_counts_safe, query),
     )
 
     safe_total = _safe_total(getattr(search_response, "total", None))
@@ -257,6 +269,7 @@ async def opds_search(
             query=query,
             sort=sort,
             mode=mode,
+            language=language,
             total=safe_total,
             availability_counts=availability_counts,
         ),
@@ -269,7 +282,7 @@ async def opds_books(request: Request, edition_olid: str):
     logger.info("GET /books/%s", edition_olid)
     base = _base_url(request)
     provider = get_provider(base)
-    resp = await asyncio.to_thread(_search, provider, query=f"edition_key:{edition_olid}", language="eng")
+    resp = await asyncio.to_thread(_search, provider, query=f"edition_key:{edition_olid}", language="en")
     if not resp.records:
         logger.warning("edition not found: %s", edition_olid)
         raise EditionNotFound(edition_olid)

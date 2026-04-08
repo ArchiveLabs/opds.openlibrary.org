@@ -8,6 +8,8 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-1}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
