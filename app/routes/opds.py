@@ -255,6 +255,7 @@ async def opds_search(
             facets={"mode": mode},
             language=language,
             title=title,
+            require_cover=False,
         ),
         asyncio.to_thread(_fetch_facet_counts_safe, query),
     )

@@ -171,6 +171,18 @@ class TestOpdsHome:
                     assert self_link["href"].startswith("https://myopds.example.com/")
                     assert "openlibrary.org" not in self_link["href"]
 
+    def test_home_defaults_to_all_languages(self, mock_empty_search):
+        """Homepage defaults to all languages (no filter)."""
+        client.get("/")
+        for call in mock_empty_search.call_args_list:
+            assert call.kwargs.get("language") is None
+
+    def test_home_english_filter(self, mock_empty_search):
+        """Passing language=en on homepage filters to English."""
+        client.get("/?language=en")
+        for call in mock_empty_search.call_args_list:
+            assert call.kwargs.get("language") == "en"
+
     def test_upstream_error_omits_shelf(self):
         """If one shelf fails upstream, the rest still load."""
         call_count = 0
@@ -237,7 +249,7 @@ class TestOpdsSearch:
         client.get("/search?query=test&page=2&limit=10")
         mock_empty_search.assert_called_once_with(
             query="test", limit=10, offset=10, sort=None, facets={"mode": "everything"},
-            language=None, title=None,
+            language=None, title=None, require_cover=False,
         )
 
     def test_invalid_limit_rejected(self):
@@ -356,21 +368,21 @@ class TestSearchModes:
         client.get("/search?query=test&mode=ebooks")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "ebooks"},
-            language=None, title=None,
+            language=None, title=None, require_cover=False,
         )
 
     def test_open_access_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=open_access")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "open_access"},
-            language=None, title=None,
+            language=None, title=None, require_cover=False,
         )
 
     def test_buyable_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=buyable")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "buyable"},
-            language=None, title=None,
+            language=None, title=None, require_cover=False,
         )
 
 
