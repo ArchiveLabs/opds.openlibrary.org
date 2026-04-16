@@ -131,7 +131,7 @@ class TestOpdsHome:
     def test_groups_present(self, mock_single_record):
         """Groups with publications are included; empty groups are filtered."""
         data = client.get("/").json()
-        assert len(data.get("groups", [])) == 6
+        assert len(data.get("groups", [])) == 7
 
     def test_empty_groups_filtered(self, mock_empty_search):
         """When search returns no records, groups are filtered out."""
@@ -171,6 +171,18 @@ class TestOpdsHome:
                     assert self_link["href"].startswith("https://myopds.example.com/")
                     assert "openlibrary.org" not in self_link["href"]
 
+    def test_home_defaults_to_all_languages(self, mock_empty_search):
+        """Homepage defaults to all languages (no filter)."""
+        client.get("/")
+        for call in mock_empty_search.call_args_list:
+            assert call.kwargs.get("language") is None
+
+    def test_home_english_filter(self, mock_empty_search):
+        """Passing language=en on homepage filters to English."""
+        client.get("/?language=en")
+        for call in mock_empty_search.call_args_list:
+            assert call.kwargs.get("language") == "en"
+
     def test_upstream_error_omits_shelf(self):
         """If one shelf fails upstream, the rest still load."""
         call_count = 0
@@ -192,7 +204,7 @@ class TestOpdsHome:
             resp = client.get("/")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data.get("groups", [])) == 5
+        assert len(data.get("groups", [])) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +249,7 @@ class TestOpdsSearch:
         client.get("/search?query=test&page=2&limit=10")
         mock_empty_search.assert_called_once_with(
             query="test", limit=10, offset=10, sort=None, facets={"mode": "everything"},
-            language="en", title=None,
+            language=None, title=None, require_cover=False,
         )
 
     def test_invalid_limit_rejected(self):
@@ -356,21 +368,21 @@ class TestSearchModes:
         client.get("/search?query=test&mode=ebooks")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "ebooks"},
-            language="en", title=None,
+            language=None, title=None, require_cover=False,
         )
 
     def test_open_access_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=open_access")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "open_access"},
-            language="en", title=None,
+            language=None, title=None, require_cover=False,
         )
 
     def test_buyable_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=buyable")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "buyable"},
-            language="en", title=None,
+            language=None, title=None, require_cover=False,
         )
 
 
@@ -379,7 +391,7 @@ class TestSearchModes:
 # Facets
 # ---------------------------------------------------------------------------
 
-def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, total=0, availability_counts=None):
+def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, title=None, total=0, availability_counts=None):
     """Return realistic facet data matching what build_facets now produces (Availability only).
 
     Only the active mode link carries rel="self"; non-active links have no rel key,
@@ -486,6 +498,93 @@ class TestHomeCacheDevMode:
             resp = client.get("/")
         assert resp.status_code == 200
         assert not mock_empty_search.called
+
+
+# ---------------------------------------------------------------------------
+# strip_markdown
+# ---------------------------------------------------------------------------
+
+class TestStripMarkdown:
+    """Tests for pyopds2_openlibrary.strip_markdown (markdown-it-py based)."""
+
+    def test_plain_text_unchanged(self):
+        from pyopds2_openlibrary import strip_markdown
+        assert strip_markdown("Hello world") == "Hello world"
+
+    def test_strips_bold(self):
+        from pyopds2_openlibrary import strip_markdown
+        assert strip_markdown("**bold text**") == "bold text"
+
+    def test_strips_italic(self):
+        from pyopds2_openlibrary import strip_markdown
+        assert strip_markdown("*italic text*") == "italic text"
+
+    def test_strips_heading(self):
+        from pyopds2_openlibrary import strip_markdown
+        result = strip_markdown("## Chapter One\nBody text")
+        assert "##" not in result
+        assert "Chapter One" in result
+        assert "Body text" in result
+
+    def test_strips_link(self):
+        from pyopds2_openlibrary import strip_markdown
+        assert strip_markdown("[click here](http://example.com)") == "click here"
+
+    def test_strips_link_with_nested_brackets(self):
+        from pyopds2_openlibrary import strip_markdown
+        result = strip_markdown("[Prey [1/2]](http://example.com)")
+        assert "Prey" in result
+        assert "http://example.com" not in result
+
+    def test_strips_html_tags(self):
+        from pyopds2_openlibrary import strip_markdown
+        assert strip_markdown("<p>hello</p>") == "hello"
+
+    def test_strips_inline_html(self):
+        from pyopds2_openlibrary import strip_markdown
+        result = strip_markdown("Some <b>bold</b> and <i>italic</i> text")
+        assert "<b>" not in result
+        assert "<i>" not in result
+        assert "bold" in result
+
+    def test_normalises_crlf(self):
+        from pyopds2_openlibrary import strip_markdown
+        result = strip_markdown("line1\r\nline2")
+        assert "\r" not in result
+        assert "line1" in result
+        assert "line2" in result
+
+    def test_collapses_excessive_blank_lines(self):
+        from pyopds2_openlibrary import strip_markdown
+        result = strip_markdown("a\n\n\n\n\nb")
+        assert "\n\n\n" not in result
+        assert "a" in result
+        assert "b" in result
+
+    def test_strips_horizontal_rule(self):
+        from pyopds2_openlibrary import strip_markdown
+        result = strip_markdown("above\n\n---\n\nbelow")
+        assert "---" not in result
+        assert "above" in result
+        assert "below" in result
+
+    def test_empty_string(self):
+        from pyopds2_openlibrary import strip_markdown
+        assert strip_markdown("") == ""
+
+    def test_mixed_markdown(self):
+        from pyopds2_openlibrary import strip_markdown
+        text = "# Title\n\n**Bold** and [a link](http://x.com).\n\n---\n\n*End*"
+        result = strip_markdown(text)
+        assert "#" not in result
+        assert "**" not in result
+        assert "*" not in result
+        assert "---" not in result
+        assert "http://x.com" not in result
+        assert "Title" in result
+        assert "Bold" in result
+        assert "a link" in result
+        assert "End" in result
 
 
 # ---------------------------------------------------------------------------

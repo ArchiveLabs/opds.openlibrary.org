@@ -40,6 +40,7 @@ FEATURED_SUBJECTS: list[dict[str, str]] = [
     {"key": "/subjects/plays",                         "presentable_name": "Plays"},
     {"key": "/subjects/music",                         "presentable_name": "Music"},
     {"key": "/subjects/science",                       "presentable_name": "Science"},
+    {"presentable_name": "Standard Ebooks",            "query": 'publisher:"Standard Ebooks" ebook_access:public'},
 ]
 
 __all__ = [

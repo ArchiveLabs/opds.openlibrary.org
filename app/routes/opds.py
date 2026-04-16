@@ -46,6 +46,16 @@ def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
+def _home_self_href(base: str, mode: str, language: Optional[str]) -> str:
+    """Build the self-link href for the homepage catalog."""
+    params: dict[str, str] = {}
+    if mode != "everything":
+        params["mode"] = mode
+    if language:
+        params["language"] = language
+    return f"{base}/?{urlencode(params)}" if params else f"{base}/"
+
+
 def _common_links(base: str) -> list[Link]:
     """Links shared across catalog responses (search template, shelf, profile)."""
     return [
@@ -98,14 +108,15 @@ def _search(provider: OpenLibraryDataProvider, **kwargs):
 async def opds_home(
     request: Request,
     mode: str = Query(default="everything", description="Availability filter: everything, ebooks, open_access, buyable"),
+    language: Optional[str] = Query(default=None, description="BCP 47 language filter (e.g. 'en'). Omit for all languages."),
 ):
-    logger.info("GET / client=%s", request.client)
+    logger.info("GET / client=%s language=%s", request.client, language)
     base = _base_url(request)
 
-    # Treat /?mode=everything as equivalent to / for caching purposes.
-    is_default_mode = not request.url.query or request.url.query == "mode=everything"
+    # Only cache the fully-default homepage (no mode filter, no language filter).
+    is_default = mode == "everything" and language is None
     cached = _home_cache.get(base)
-    if ENVIRONMENT != "development" and is_default_mode and cached and (time.monotonic() - cached[0]) < HOME_CACHE_TTL:
+    if ENVIRONMENT != "development" and is_default and cached and (time.monotonic() - cached[0]) < HOME_CACHE_TTL:
         logger.info("serving cached homepage for base=%s", base)
         return opds_response(cached[1])
 
@@ -148,13 +159,18 @@ async def opds_home(
             f'subject_key:textbooks publish_year:[1990 TO *] {ea}',
             "trending",
         ),
+        (
+            "Standard Ebooks",
+            'publisher:"Standard Ebooks" ebook_access:public',
+            "random.hourly",
+        ),
     ]
 
     async def fetch_group(title: str, q: str, sort: str):
         try:
             resp = await asyncio.to_thread(
                 _search, provider, query=q, sort=sort, limit=25,
-                language="en", facets={"mode": mode}, title=title,
+                language=language, facets={"mode": mode}, title=title,
             )
             return Catalog.create(metadata=Metadata(title=title), response=resp)
         except UpstreamError as exc:
@@ -176,8 +192,8 @@ async def opds_home(
             href=f"{search_url}?{urlencode({
                 'sort': 'trending',
                 'title': subject['presentable_name'],
-                'language': 'en',
-                'query': (
+                **({'language': language} if language else {}),
+                'query': subject.get('query') or (
                     f'subject_key:{subject["key"].split("/")[-1]}'
                     f' -subject:"content_warning:cover"'
                     f' ebook_access:[borrowable TO *]'
@@ -192,11 +208,11 @@ async def opds_home(
         publications=[],
         navigation=navigation,
         groups=loaded_groups,
-        facets=OpenLibraryDataProvider.build_home_facets(base, mode),
+        facets=OpenLibraryDataProvider.build_home_facets(base, mode, language),
         links=[
             Link(
                 rel="self",
-                href=f"{base}/" if mode == "everything" else f"{base}/?mode={mode}",
+                href=_home_self_href(base, mode, language),
                 type=OPDS_MEDIA_TYPE,
             ),
             Link(rel="start", href=f"{base}/", type=OPDS_MEDIA_TYPE),
@@ -204,7 +220,7 @@ async def opds_home(
         ],
     )
     data = catalog.model_dump()
-    if ENVIRONMENT != "development" and is_default_mode:
+    if ENVIRONMENT != "development" and is_default:
         _home_cache[base] = (time.monotonic(), data)
     return opds_response(data)
 
@@ -218,7 +234,7 @@ async def opds_search(
     sort: Optional[str] = Query(default=None),
     mode: str = Query(default="everything", description="Search mode, e.g. 'ebooks' or 'everything'"),
     title: Optional[str] = Query(default=None, description="Display title for the results page"),
-    language: str = Query(default="en", description="Language code to prefer (e.g. 'en', 'fr')"),
+    language: Optional[str] = Query(default=None, description="BCP 47 language filter (e.g. 'en'). Omit for all languages."),
 ):
     logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s language=%s", query, limit, page, sort, mode, language)
     base = _base_url(request)
@@ -244,6 +260,7 @@ async def opds_search(
             facets={"mode": mode},
             language=language,
             title=title,
+            require_cover=False,
         ),
         asyncio.to_thread(_fetch_facet_counts_safe, query),
     )
@@ -270,6 +287,7 @@ async def opds_search(
             sort=sort,
             mode=mode,
             language=language,
+            title=title,
             total=safe_total,
             availability_counts=availability_counts,
         ),
