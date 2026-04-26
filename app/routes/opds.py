@@ -5,11 +5,13 @@ import asyncio
 import time
 
 import httpx
-from fastapi import APIRouter, Query, Request
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from pyopds2 import Catalog, Link, Metadata
-from pyopds2_openlibrary import OpenLibraryDataProvider
+from pyopds2_openlibrary import OpenLibraryDataProvider, fetch_author_bio
 
 from app.config import (
     ENVIRONMENT,
@@ -20,7 +22,7 @@ from app.config import (
     OPDS_MEDIA_TYPE,
     OPDS_PUB_MEDIA_TYPE,
 )
-from app.exceptions import EditionNotFound, UpstreamError
+from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -202,3 +204,65 @@ async def opds_books(request: Request, edition_olid: str):
         raise EditionNotFound(edition_olid)
     pub = resp.records[0].to_publication()
     return opds_pub_response(pub.model_dump())
+
+
+@router.get("/authors/{olid}", summary="OPDS 2.0 author catalog")
+async def opds_authors(
+    request: Request,
+    olid: str = Path(..., pattern=r"^OL\d+A$"),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    mode: str = Query(default="everything"),
+):
+    logger.info("GET /authors/%s page=%s limit=%s mode=%s", olid, page, limit, mode)
+    base = _base_url(request)
+    provider = get_provider(base)
+
+    (author_name, author_bio), search_response = await asyncio.gather(
+        asyncio.to_thread(fetch_author_bio, olid),
+        asyncio.to_thread(
+            _search, provider,
+            query=f"author_key:{olid}",
+            limit=limit,
+            offset=(page - 1) * limit,
+            facets={"mode": mode},
+            require_cover=False,
+        ),
+    )
+
+    if not search_response.records and author_name is None and author_bio is None:
+        raise AuthorNotFound(olid)
+
+    def _author_page_href(p: int) -> str:
+        params: dict[str, str] = {}
+        if p > 1:
+            params["page"] = str(p)
+        if limit != 25:
+            params["limit"] = str(limit)
+        if mode != "everything":
+            params["mode"] = mode
+        return f"{base}/authors/{olid}?{urlencode(params)}" if params else f"{base}/authors/{olid}"
+
+    catalog_links: list[Link] = [
+        Link(rel="self", href=_author_page_href(page), type=OPDS_MEDIA_TYPE),
+        Link(rel="first", href=_author_page_href(1), type=OPDS_MEDIA_TYPE),
+        *_common_links(base),
+    ]
+    if page > 1:
+        catalog_links.append(Link(rel="previous", href=_author_page_href(page - 1), type=OPDS_MEDIA_TYPE))
+    if search_response.has_more:
+        catalog_links.append(Link(rel="next", href=_author_page_href(page + 1), type=OPDS_MEDIA_TYPE))
+
+    catalog = Catalog.create(
+        metadata=Metadata(
+            title=author_name or olid,
+            description=author_bio,
+            numberOfItems=search_response.total,
+            itemsPerPage=limit,
+            currentPage=page,
+        ),
+        response=search_response,
+        paginate=False,
+        links=catalog_links,
+    )
+    return opds_response(catalog.model_dump())
