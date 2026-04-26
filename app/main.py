@@ -7,7 +7,7 @@ import os
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.exceptions import EditionNotFound, UpstreamError
+from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
 from app.logger import get_logger
 from app.routes.opds import router as opds_router
 from app.sentry import init_sentry
@@ -43,6 +43,12 @@ logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 @app.exception_handler(EditionNotFound)
 def handle_edition_not_found(_: Request, exc: EditionNotFound) -> JSONResponse:
     logger.warning("404 EditionNotFound: %s", exc)
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(AuthorNotFound)
+def handle_author_not_found(_: Request, exc: AuthorNotFound) -> JSONResponse:
+    logger.warning("404 AuthorNotFound: %s", exc)
     return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 
