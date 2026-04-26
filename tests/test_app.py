@@ -8,7 +8,7 @@ Network calls to openlibrary.org are mocked so tests run offline.
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -24,6 +24,7 @@ SEARCH_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.search"
 FACET_COUNTS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.fetch_facet_counts"
 BUILD_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_facets"
 BUILD_HOME_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_home_facets"
+FETCH_AUTHOR_BIO_PATCH_TARGET = "app.routes.opds.fetch_author_bio"
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +627,124 @@ class TestStripMarkdown:
 
 
 # ---------------------------------------------------------------------------
+# GET /authors/{olid}
+# ---------------------------------------------------------------------------
+
+class TestOpdsAuthors:
+    def test_happy_path_returns_200(self):
+        record = _make_record(title="The Good Lord Bird")
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("James McBride", "An American author.")), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            resp = client.get("/authors/OL1234A")
+        assert resp.status_code == 200
+
+    def test_content_type(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author Name", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            resp = client.get("/authors/OL1234A")
+        assert "application/opds+json" in resp.headers["content-type"]
+
+    def test_metadata_title_is_author_name(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("James McBride", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        assert data["metadata"]["title"] == "James McBride"
+
+    def test_metadata_description_is_bio(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("James McBride", "An American author.")), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        assert data["metadata"]["description"] == "An American author."
+
+    def test_publications_present(self):
+        record = _make_record(title="The Color of Water")
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("James McBride", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        assert len(data.get("publications", [])) == 1
+        assert data["publications"][0]["metadata"]["title"] == "The Color of Water"
+
+    def test_bio_fetch_failure_still_returns_200(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=(None, None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            resp = client.get("/authors/OL1234A")
+        assert resp.status_code == 200
+
+    def test_bio_failure_uses_olid_as_title(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=(None, None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        assert data["metadata"]["title"] == "OL1234A"
+
+    def test_no_books_and_no_bio_returns_404(self):
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=(None, None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[], total=0)):
+            resp = client.get("/authors/OL9999A")
+        assert resp.status_code == 404
+
+    def test_invalid_olid_returns_422(self):
+        resp = client.get("/authors/notanolid")
+        assert resp.status_code == 422
+
+    def test_invalid_olid_wrong_suffix_returns_422(self):
+        resp = client.get("/authors/OL1234M")
+        assert resp.status_code == 422
+
+    def test_self_link_present(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        rels = {l["rel"] for l in data.get("links", [])}
+        assert "self" in rels
+
+    def test_first_link_present(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        rels = {l["rel"] for l in data.get("links", [])}
+        assert "first" in rels
+
+    def test_next_link_when_more_results(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=50)):
+            data = client.get("/authors/OL1234A?limit=25").json()
+        rels = {l["rel"] for l in data.get("links", [])}
+        assert "next" in rels
+
+    def test_no_next_link_on_last_page(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        rels = {l["rel"] for l in data.get("links", [])}
+        assert "next" not in rels
+
+    def test_previous_link_on_page2(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=50)):
+            data = client.get("/authors/OL1234A?page=2&limit=25").json()
+        rels = {l["rel"] for l in data.get("links", [])}
+        assert "previous" in rels
+
+    def test_no_previous_link_on_page1(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        rels = {l["rel"] for l in data.get("links", [])}
+        assert "previous" not in rels
+
+
+# ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 
@@ -634,3 +753,144 @@ class TestHealth:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# AuthorNotFound exception
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# fetch_author_bio helper
+# ---------------------------------------------------------------------------
+
+class TestFetchAuthorBio:
+    def test_happy_path_string_bio(self):
+        from pyopds2_openlibrary import fetch_author_bio
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "name": "James McBride",
+            "bio": "An American author and musician.",
+        }
+        with patch("pyopds2_openlibrary._get", return_value=mock_resp):
+            name, bio = fetch_author_bio("OL1234A")
+        assert name == "James McBride"
+        assert bio == "An American author and musician."
+
+    def test_dict_bio_normalized(self):
+        from pyopds2_openlibrary import fetch_author_bio
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "name": "Anton Chekhov",
+            "bio": {"type": "/type/text", "value": "Russian playwright."},
+        }
+        with patch("pyopds2_openlibrary._get", return_value=mock_resp):
+            name, bio = fetch_author_bio("OL19677A")
+        assert name == "Anton Chekhov"
+        assert bio == "Russian playwright."
+
+    def test_no_bio_field_returns_none_bio(self):
+        from pyopds2_openlibrary import fetch_author_bio
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"name": "No Bio Author"}
+        with patch("pyopds2_openlibrary._get", return_value=mock_resp):
+            name, bio = fetch_author_bio("OL9999A")
+        assert name == "No Bio Author"
+        assert bio is None
+
+    def test_returns_none_none_on_network_error(self):
+        from pyopds2_openlibrary import fetch_author_bio
+        with patch("pyopds2_openlibrary._get", side_effect=Exception("timeout")):
+            name, bio = fetch_author_bio("OL1234A")
+        assert name is None
+        assert bio is None
+
+    def test_personal_name_fallback(self):
+        from pyopds2_openlibrary import fetch_author_bio
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"personal_name": "Fallback Name"}
+        with patch("pyopds2_openlibrary._get", return_value=mock_resp):
+            name, bio = fetch_author_bio("OL5678A")
+        assert name == "Fallback Name"
+
+
+# ---------------------------------------------------------------------------
+# AuthorNotFound exception
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Author OPDS link in publication contributors
+# ---------------------------------------------------------------------------
+
+class TestAuthorOpdsLink:
+    def test_author_has_opds_link(self):
+        from pyopds2_openlibrary import OpenLibraryDataRecord, OpenLibraryDataProvider
+        OpenLibraryDataProvider.OPDS_BASE_URL = "https://opds.example.com"
+        record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL1W",
+            "title": "Test Book",
+            "author_name": ["James McBride"],
+            "author_key": ["OL1234A"],
+            "editions": {
+                "numFound": 1, "start": 0, "numFoundExact": True,
+                "docs": [{"key": "/books/OL1M", "title": "Test Book"}],
+            },
+        })
+        meta = record.metadata()
+        assert meta.author is not None
+        author = meta.author[0]
+        link_types = [l.type for l in (author.links or [])]
+        assert "application/opds+json" in link_types
+
+    def test_opds_link_href_contains_olid(self):
+        from pyopds2_openlibrary import OpenLibraryDataRecord, OpenLibraryDataProvider
+        OpenLibraryDataProvider.OPDS_BASE_URL = "https://opds.example.com"
+        record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL1W",
+            "title": "Test Book",
+            "author_name": ["James McBride"],
+            "author_key": ["OL1234A"],
+            "editions": {
+                "numFound": 1, "start": 0, "numFoundExact": True,
+                "docs": [{"key": "/books/OL1M", "title": "Test Book"}],
+            },
+        })
+        meta = record.metadata()
+        author = meta.author[0]
+        opds_link = next(
+            (l for l in (author.links or []) if l.type == "application/opds+json"),
+            None,
+        )
+        assert opds_link is not None
+        assert "OL1234A" in opds_link.href
+        assert opds_link.href.startswith("https://opds.example.com/authors/")
+
+    def test_name_only_author_has_no_opds_link(self):
+        from pyopds2_openlibrary import OpenLibraryDataRecord
+        record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL2W",
+            "title": "Name Only Book",
+            "author_name": ["Anonymous"],
+            "editions": {
+                "numFound": 1, "start": 0, "numFoundExact": True,
+                "docs": [{"key": "/books/OL2M", "title": "Name Only Book"}],
+            },
+        })
+        meta = record.metadata()
+        author = meta.author[0]
+        opds_link = next(
+            (l for l in (author.links or []) if l.type == "application/opds+json"),
+            None,
+        )
+        assert opds_link is None
+
+
+# ---------------------------------------------------------------------------
+# AuthorNotFound exception
+# ---------------------------------------------------------------------------
+
+class TestAuthorNotFound:
+    def test_exception_message(self):
+        from app.exceptions import AuthorNotFound
+        exc = AuthorNotFound("OL123A")
+        assert str(exc) == "Author not found: OL123A"
+        assert exc.author_olid == "OL123A"
