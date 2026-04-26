@@ -15,7 +15,7 @@ app/
   exceptions/
     __init__.py        # OPDSException, EditionNotFound, UpstreamError
   routes/
-    opds.py            # All route handlers (/, /search, /books/*)
+    opds.py            # All route handlers (/, /search, /books/*, /authors/*)
 docker/
   Dockerfile           # Docker image definition
   docker-compose.yml   # Compose service definition
@@ -121,6 +121,9 @@ curl -s "http://localhost:8080/search?query=Python&limit=5" | python -m json.too
 # Single edition
 curl -s http://localhost:8080/books/OL7353617M | python -m json.tool | head -30
 
+# Author catalog (bio + paginated books)
+curl -s "http://localhost:8080/authors/OL1A" | python -m json.tool | head -30
+
 # 404 — non-existent edition
 curl -s http://localhost:8080/books/OL0000000M
 # → {"detail": "Edition not found: OL0000000M"}
@@ -145,5 +148,6 @@ All tests are offline — network calls to OpenLibrary are mocked.
 |-----------|-------------|-------|
 | `EditionNotFound` | 404 | Edition OLID not found in OpenLibrary |
 | `UpstreamError` | 502 | OpenLibrary returned an error or is unreachable |
+| `AuthorNotFound` | 404 | Author OLID not found in OpenLibrary |
 
 All errors are logged to stdout by the service logger.
