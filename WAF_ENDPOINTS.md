@@ -9,13 +9,14 @@ Regex patterns for all valid routes, intended for WAF allow-list configuration.
 | Homepage | GET | `^/$` |
 | Search | GET | `^/search(\?.*)?$` |
 | Single Edition | GET | `^/books/OL[0-9]+M$` |
+| Author Catalog | GET | `^/authors/OL[0-9]+A(\?.*)?$` |
 | Health Check | GET | `^/health$` |
 | Service Worker | GET | `^/sw\.js$` |
 
 ## Combined Allow-List
 
 ```
-^/(search(\?.*)?|books/OL[0-9]+M|health|sw\.js)?$
+^/(search(\?.*)?|books/OL[0-9]+M|authors/OL[0-9]+A(\?.*)?|health|sw\.js)?$
 ```
 
 ## Notes
