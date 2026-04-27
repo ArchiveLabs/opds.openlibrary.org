@@ -172,6 +172,15 @@ class TestOpdsHome:
         assert len(data1.get("navigation", [])) > 0
         assert len(data2.get("navigation", [])) == 0
 
+    def test_facets_present_on_all_pages(self, mock_single_record):
+        """build_home_facets is called on every page, not just page 1 (issue #71)."""
+        stub = [{"metadata": {"title": "Availability"}, "links": []}]
+        with patch(BUILD_HOME_FACETS_PATCH_TARGET, return_value=stub) as mock_hf:
+            for page in (1, 2, 3):
+                data = client.get(f"/?page={page}").json()
+                assert data["facets"] == stub, f"facets missing on page {page}"
+        assert mock_hf.call_count == 3, "build_home_facets must be called for every page"
+
     def test_empty_groups_filtered(self, mock_empty_search):
         """When search returns no records, groups are filtered out."""
         data = client.get("/").json()
@@ -288,7 +297,7 @@ class TestOpdsSearch:
         client.get("/search?query=test&page=2&limit=10")
         mock_empty_search.assert_called_once_with(
             query="test", limit=10, offset=10, sort=None, facets={"mode": "everything"},
-            language=None, title=None, require_cover=False,
+            language=None, title=None, require_cover=False, media_type=None,
         )
 
     def test_invalid_limit_rejected(self):
@@ -407,21 +416,28 @@ class TestSearchModes:
         client.get("/search?query=test&mode=ebooks")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "ebooks"},
-            language=None, title=None, require_cover=False,
+            language=None, title=None, require_cover=False, media_type=None,
         )
 
     def test_open_access_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=open_access")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "open_access"},
-            language=None, title=None, require_cover=False,
+            language=None, title=None, require_cover=False, media_type=None,
+        )
+
+    def test_print_disabled_mode_forwarded(self, mock_empty_search):
+        client.get("/search?query=test&mode=print_disabled")
+        mock_empty_search.assert_called_once_with(
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "print_disabled"},
+            language=None, title=None, require_cover=False, media_type=None,
         )
 
     def test_buyable_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=buyable")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "buyable"},
-            language=None, title=None, require_cover=False,
+            language=None, title=None, require_cover=False, media_type=None,
         )
 
 
@@ -430,7 +446,7 @@ class TestSearchModes:
 # Facets
 # ---------------------------------------------------------------------------
 
-def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, title=None, total=0, availability_counts=None):
+def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, title=None, total=0, availability_counts=None, media_type=None):
     """Return realistic facet data matching what build_facets now produces (Availability only).
 
     Only the active mode link carries rel="self"; non-active links have no rel key,
@@ -446,10 +462,11 @@ def _fake_facets(base_url="", query="test", sort=None, mode="everything", langua
         return link
 
     avail_links = [
-        _avail_link("everything",  "Everything",            f"{base_url}/search?query={query}"),
-        _avail_link("ebooks",      "Available to Borrow",   f"{base_url}/search?query={query}&mode=ebooks"),
-        _avail_link("open_access", "Open Access",           f"{base_url}/search?query={query}&mode=open_access"),
-        _avail_link("buyable",     "Available to Purchase", f"{base_url}/search?query={query}&mode=buyable"),
+        _avail_link("everything",     "Everything",            f"{base_url}/search?query={query}"),
+        _avail_link("ebooks",         "Available to Borrow",   f"{base_url}/search?query={query}&mode=ebooks"),
+        _avail_link("print_disabled", "Print Disabled",        f"{base_url}/search?query={query}&mode=print_disabled"),
+        _avail_link("open_access",    "Open Access",           f"{base_url}/search?query={query}&mode=open_access"),
+        _avail_link("buyable",        "Available for Purchase", f"{base_url}/search?query={query}&mode=buyable"),
     ]
     return [
         {"metadata": {"title": "Availability"}, "links": avail_links},
@@ -491,8 +508,40 @@ class TestFacets:
         titles = {l["title"] for l in data["facets"][0]["links"]}
         assert "Everything" in titles
         assert "Available to Borrow" in titles
+        assert "Print Disabled" in titles
         assert "Open Access" in titles
-        assert "Available to Purchase" in titles
+        assert "Available for Purchase" in titles
+
+
+# ---------------------------------------------------------------------------
+# Media type facet
+# ---------------------------------------------------------------------------
+
+class TestMediaTypeFacet:
+    def test_media_type_forwarded_to_search(self, mock_empty_search):
+        client.get("/search?query=test&media_type=audiobook")
+        mock_empty_search.assert_called_once_with(
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "everything"},
+            language=None, title=None, require_cover=False, media_type="audiobook",
+        )
+
+    def test_ebook_media_type_forwarded(self, mock_empty_search):
+        client.get("/search?query=test&media_type=ebook")
+        mock_empty_search.assert_called_once_with(
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "everything"},
+            language=None, title=None, require_cover=False, media_type="ebook",
+        )
+
+    def test_media_type_in_build_facets_call(self, mock_empty_search):
+        with patch(BUILD_FACETS_PATCH_TARGET, return_value=[]) as mock_bf:
+            client.get("/search?query=test&media_type=audiobook")
+        _, kwargs = mock_bf.call_args
+        assert kwargs.get("media_type") == "audiobook"
+
+    def test_home_media_type_forwarded_to_search(self, mock_empty_search):
+        client.get("/?media_type=ebook")
+        for call in mock_empty_search.call_args_list:
+            assert call.kwargs.get("media_type") == "ebook"
 
 
 # ---------------------------------------------------------------------------
@@ -742,6 +791,53 @@ class TestOpdsAuthors:
             data = client.get("/authors/OL1234A").json()
         rels = {l["rel"] for l in data.get("links", [])}
         assert "previous" not in rels
+
+    def test_author_facets_present(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        facet_titles = {f["metadata"]["title"] for f in data.get("facets", [])}
+        assert "Availability" in facet_titles
+        assert "Language" in facet_titles
+        assert "Media Type" in facet_titles
+
+    def test_author_availability_facet_no_buyable(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
+        titles = {l["title"] for l in avail["links"]}
+        assert "Available for Purchase" not in titles
+
+    def test_author_active_mode_marked_with_self_rel(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A?mode=ebooks").json()
+        avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
+        ebooks_link = next(l for l in avail["links"] if l["title"] == "Available to Borrow")
+        assert ebooks_link.get("rel") == "self"
+
+    def test_author_media_type_filter_forwarded(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)) as mock_s:
+            client.get("/authors/OL1234A?media_type=audiobook")
+        _, kwargs = mock_s.call_args
+        assert kwargs.get("media_type") == "audiobook"
+
+    def test_author_facet_links_preserve_filters(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A?mode=ebooks&media_type=ebook").json()
+        # Language facet links should carry current mode and media_type
+        lang = next(f for f in data["facets"] if f["metadata"]["title"] == "Language")
+        en_link = next(l for l in lang["links"] if l["title"] == "English")
+        assert "mode=ebooks" in en_link["href"]
+        assert "media_type=ebook" in en_link["href"]
 
 
 # ---------------------------------------------------------------------------
