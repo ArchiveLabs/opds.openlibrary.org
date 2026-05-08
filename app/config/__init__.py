@@ -20,7 +20,10 @@ OL_USER_AGENT: str = os.environ.get(
 )
 OL_REQUEST_TIMEOUT: float = float(os.environ.get("OL_REQUEST_TIMEOUT", "30.0"))
 
-SENTRY_DSN: str | None = os.environ.get("SENTRY_DSN")
+SENTRY_DSN: str | None = os.environ.get(
+    "SENTRY_DSN",
+    "https://8d8cab445edc9b4e452ba06d0be46dcb@sentry.archive.org/73",
+)
 SENTRY_TRACES_SAMPLE_RATE: float = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
 SENTRY_PROFILE_SESSION_SAMPLE_RATE: float = float(os.environ.get("SENTRY_PROFILE_SESSION_SAMPLE_RATE", "0.1"))
 

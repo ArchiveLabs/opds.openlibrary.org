@@ -15,6 +15,7 @@ class TestInitSentry:
 
     def test_returns_true_and_calls_sdk_init(self):
         with patch("app.sentry.SENTRY_DSN", "https://fake@sentry.example.com/1"), \
+             patch("app.sentry.ENVIRONMENT", "production"), \
              patch("app.sentry.sentry_sdk") as mock_sdk:
             from app.sentry import init_sentry
             assert init_sentry() is True
