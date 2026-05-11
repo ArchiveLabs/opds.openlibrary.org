@@ -1,4 +1,5 @@
 variables:
+  ENVIRONMENT: 'production'
   NOMAD_VAR_PORTS: '{ 8080 = "http" }'
   NOMAD_VAR_CHECK_PATH: '/health'
 
