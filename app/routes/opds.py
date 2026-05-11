@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 import asyncio
+import inspect
 import time
 
 import httpx
@@ -81,7 +82,7 @@ def _search(provider: OpenLibraryDataProvider, **kwargs):
         logger.info("search query=%r limit=%s offset=%s sort=%s",
                     kwargs.get("query"), kwargs.get("limit"),
                     kwargs.get("offset", 0), kwargs.get("sort"))
-        return provider.search(**kwargs)
+        return _call_provider_compat(provider.search, **kwargs)
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code
         logger.error("upstream HTTP error status=%s url=%s", status_code, exc.request.url)
@@ -94,6 +95,27 @@ def _search(provider: OpenLibraryDataProvider, **kwargs):
         raise UpstreamError(f"Could not reach OpenLibrary: {exc}") from exc
 
 
+def _call_provider_compat(func, **kwargs):
+    """Call provider methods while tolerating older signatures.
+
+    This keeps newer route parameters (like ``access``) from crashing when
+    an older ``pyopds2_openlibrary`` version is imported at runtime.
+    """
+    signature = inspect.signature(func)
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return func(**kwargs)
+
+    supported = {k: v for k, v in kwargs.items() if k in signature.parameters}
+    skipped = sorted(set(kwargs) - set(supported))
+    if skipped:
+        logger.warning(
+            "provider call %s does not support parameters %s; ignoring them",
+            getattr(func, "__qualname__", getattr(func, "__name__", str(func))),
+            skipped,
+        )
+    return func(**supported)
+
+
 @router.get("/", summary="OPDS 2.0 homepage")
 async def opds_home(
     request: Request,
@@ -101,12 +123,13 @@ async def opds_home(
     language: Optional[str] = Query(default=None, description="BCP 47 language filter (e.g. 'en'). Omit for all languages."),
     page: int = Query(default=1, ge=1, description="Group page (each page loads a batch of carousels)"),
     media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook. Omit for all."),
+    access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
 ):
-    logger.info("GET / client=%s language=%s page=%s media_type=%s", request.client, language, page, media_type)
+    logger.info("GET / client=%s language=%s page=%s media_type=%s access=%s", request.client, language, page, media_type, access)
     base = _base_url(request)
 
     # Only cache the fully-default first page.
-    is_default = mode == "everything" and language is None and page == 1 and media_type is None
+    is_default = mode == "everything" and language is None and page == 1 and media_type is None and access is None
     cached = _home_cache.get(base)
     if ENVIRONMENT != "development" and is_default and cached and (time.monotonic() - cached[0]) < HOME_CACHE_TTL:
         logger.info("serving cached homepage for base=%s", base)
@@ -115,8 +138,14 @@ async def opds_home(
     get_provider(base)
 
     data = await asyncio.to_thread(
+        _call_provider_compat,
         OpenLibraryDataProvider.build_home_feed,
-        base=base, mode=mode, language=language, page=page, media_type=media_type,
+        base=base,
+        mode=mode,
+        language=language,
+        page=page,
+        media_type=media_type,
+        access=access,
     )
 
     if ENVIRONMENT != "development" and is_default:
@@ -135,8 +164,9 @@ async def opds_search(
     title: Optional[str] = Query(default=None, description="Display title for the results page"),
     language: Optional[str] = Query(default=None, description="BCP 47 language filter (e.g. 'en'). Omit for all languages."),
     media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook. Omit for all."),
+    access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
 ):
-    logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s language=%s media_type=%s", query, limit, page, sort, mode, language, media_type)
+    logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s language=%s media_type=%s access=%s", query, limit, page, sort, mode, language, media_type, access)
     base = _base_url(request)
     provider = get_provider(base)
 
@@ -162,6 +192,7 @@ async def opds_search(
             title=title,
             require_cover=False,
             media_type=media_type,
+            access=access,
         ),
         asyncio.to_thread(_fetch_facet_counts_safe, query),
     )
@@ -182,7 +213,8 @@ async def opds_search(
             Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
             *_common_links(base),
         ],
-        facets=OpenLibraryDataProvider.build_facets(
+        facets=_call_provider_compat(
+            OpenLibraryDataProvider.build_facets,
             base_url=base,
             query=query,
             sort=sort,
@@ -192,6 +224,7 @@ async def opds_search(
             total=safe_total,
             availability_counts=availability_counts,
             media_type=media_type,
+            access=access,
         ),
     )
     return opds_response(catalog.model_dump())
@@ -219,8 +252,9 @@ async def opds_authors(
     mode: str = Query(default="everything"),
     language: Optional[str] = Query(default=None, description="BCP 47 language filter (e.g. 'en'). Omit for all languages."),
     media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook. Omit for all."),
+    access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
 ):
-    logger.info("GET /authors/%s page=%s limit=%s mode=%s language=%s media_type=%s", olid, page, limit, mode, language, media_type)
+    logger.info("GET /authors/%s page=%s limit=%s mode=%s language=%s media_type=%s access=%s", olid, page, limit, mode, language, media_type, access)
     base = _base_url(request)
     provider = get_provider(base)
 
@@ -235,6 +269,7 @@ async def opds_authors(
             language=language,
             media_type=media_type,
             require_cover=False,
+            access=access,
         ),
     )
 
@@ -253,6 +288,8 @@ async def opds_authors(
             params["language"] = language
         if media_type:
             params["media_type"] = media_type
+        if access and access != "general":
+            params["access"] = access
         return f"{base}/authors/{olid}?{urlencode(params)}" if params else f"{base}/authors/{olid}"
 
     catalog_links: list[Link] = [
@@ -276,7 +313,8 @@ async def opds_authors(
         response=search_response,
         paginate=False,
         links=catalog_links,
-        facets=OpenLibraryDataProvider.build_author_facets(
+        facets=_call_provider_compat(
+            OpenLibraryDataProvider.build_author_facets,
             base_url=base,
             olid=olid,
             mode=mode,
@@ -284,6 +322,7 @@ async def opds_authors(
             media_type=media_type,
             page=page,
             limit=limit,
+            access=access,
         ),
     )
     return opds_response(catalog.model_dump())

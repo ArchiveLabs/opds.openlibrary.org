@@ -297,7 +297,7 @@ class TestOpdsSearch:
         client.get("/search?query=test&page=2&limit=10")
         mock_empty_search.assert_called_once_with(
             query="test", limit=10, offset=10, sort=None, facets={"mode": "everything"},
-            language=None, title=None, require_cover=False, media_type=None,
+            language=None, title=None, require_cover=False, media_type=None, access=None,
         )
 
     def test_invalid_limit_rejected(self):
@@ -416,28 +416,28 @@ class TestSearchModes:
         client.get("/search?query=test&mode=ebooks")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "ebooks"},
-            language=None, title=None, require_cover=False, media_type=None,
+            language=None, title=None, require_cover=False, media_type=None, access=None,
         )
 
     def test_open_access_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=open_access")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "open_access"},
-            language=None, title=None, require_cover=False, media_type=None,
+            language=None, title=None, require_cover=False, media_type=None, access=None,
         )
 
-    def test_print_disabled_mode_forwarded(self, mock_empty_search):
-        client.get("/search?query=test&mode=print_disabled")
+    def test_access_print_disabled_forwarded(self, mock_empty_search):
+        client.get("/search?query=test&access=print_disabled")
         mock_empty_search.assert_called_once_with(
-            query="test", limit=25, offset=0, sort=None, facets={"mode": "print_disabled"},
-            language=None, title=None, require_cover=False, media_type=None,
+            query="test", limit=25, offset=0, sort=None, facets={"mode": "everything"},
+            language=None, title=None, require_cover=False, media_type=None, access="print_disabled",
         )
 
     def test_buyable_mode_forwarded(self, mock_empty_search):
         client.get("/search?query=test&mode=buyable")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "buyable"},
-            language=None, title=None, require_cover=False, media_type=None,
+            language=None, title=None, require_cover=False, media_type=None, access=None,
         )
 
 
@@ -446,30 +446,42 @@ class TestSearchModes:
 # Facets
 # ---------------------------------------------------------------------------
 
-def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, title=None, total=0, availability_counts=None, media_type=None):
-    """Return realistic facet data matching what build_facets now produces (Availability only).
+def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, title=None, total=0, availability_counts=None, media_type=None, access=None):
+    """Return realistic facet data matching what build_facets now produces.
 
-    Only the active mode link carries rel="self"; non-active links have no rel key,
-    matching the real _build_availability_links output.
+    Only the active mode/access link carries rel="self"; non-active links have no rel key,
+    matching the real _build_availability_links / _build_access_links output.
     """
     counts = availability_counts or _FAKE_AVAILABILITY_COUNTS
 
-    def _avail_link(mode_val, title, href):
-        link = {"title": title, "href": href, "type": "application/opds+json",
+    def _avail_link(mode_val, lbl, href):
+        link = {"title": lbl, "href": href, "type": "application/opds+json",
                 "properties": {"numberOfItems": counts.get(mode_val, 0)}}
         if mode_val == mode:
             link["rel"] = "self"
         return link
 
+    active_access = access or "general"
+
+    def _access_link(ac_val, lbl, href):
+        link = {"title": lbl, "href": href, "type": "application/opds+json"}
+        if ac_val == active_access:
+            link["rel"] = "self"
+        return link
+
     avail_links = [
-        _avail_link("everything",     "Everything",            f"{base_url}/search?query={query}"),
-        _avail_link("ebooks",         "Available to Borrow",   f"{base_url}/search?query={query}&mode=ebooks"),
-        _avail_link("print_disabled", "Print Disabled",        f"{base_url}/search?query={query}&mode=print_disabled"),
-        _avail_link("open_access",    "Open Access",           f"{base_url}/search?query={query}&mode=open_access"),
-        _avail_link("buyable",        "Available for Purchase", f"{base_url}/search?query={query}&mode=buyable"),
+        _avail_link("everything",  "Everything",            f"{base_url}/search?query={query}"),
+        _avail_link("ebooks",      "Available to Borrow",   f"{base_url}/search?query={query}&mode=ebooks"),
+        _avail_link("open_access", "Open Access",           f"{base_url}/search?query={query}&mode=open_access"),
+        _avail_link("buyable",     "Available for Purchase", f"{base_url}/search?query={query}&mode=buyable"),
+    ]
+    access_links = [
+        _access_link("general",        "General",       f"{base_url}/search?query={query}"),
+        _access_link("print_disabled", "Print Disabled", f"{base_url}/search?query={query}&access=print_disabled"),
     ]
     return [
         {"metadata": {"title": "Availability"}, "links": avail_links},
+        {"metadata": {"title": "Access"}, "links": access_links},
     ]
 
 
@@ -485,12 +497,12 @@ class TestFacets:
     def test_search_response_includes_facets(self, mock_empty_search):
         data = client.get("/search?query=test").json()
         assert "facets" in data
-        assert len(data["facets"]) == 1
+        assert len(data["facets"]) == 2
 
     def test_availability_facet_has_metadata_title(self, mock_empty_search):
         data = client.get("/search?query=test").json()
-        avail_facet = data["facets"][0]
-        assert avail_facet["metadata"]["title"] == "Availability"
+        facet_titles = {f["metadata"]["title"] for f in data["facets"]}
+        assert "Availability" in facet_titles
 
     def test_no_sort_facet_in_response(self, mock_empty_search):
         data = client.get("/search?query=test").json()
@@ -499,18 +511,39 @@ class TestFacets:
 
     def test_active_availability_facet_has_self_rel(self, mock_empty_search):
         data = client.get("/search?query=test&mode=ebooks").json()
-        avail_links = data["facets"][0]["links"]
-        ebooks_link = next(l for l in avail_links if l["title"] == "Available to Borrow")
+        avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
+        ebooks_link = next(l for l in avail["links"] if l["title"] == "Available to Borrow")
         assert ebooks_link["rel"] == "self"
 
     def test_availability_labels_match_canonical(self, mock_empty_search):
         data = client.get("/search?query=test").json()
-        titles = {l["title"] for l in data["facets"][0]["links"]}
+        avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
+        titles = {l["title"] for l in avail["links"]}
         assert "Everything" in titles
         assert "Available to Borrow" in titles
-        assert "Print Disabled" in titles
         assert "Open Access" in titles
         assert "Available for Purchase" in titles
+        assert "Print Disabled" not in titles
+
+    def test_access_facet_present(self, mock_empty_search):
+        data = client.get("/search?query=test").json()
+        access_facet = next((f for f in data["facets"] if f["metadata"]["title"] == "Access"), None)
+        assert access_facet is not None
+        titles = {l["title"] for l in access_facet["links"]}
+        assert "General" in titles
+        assert "Print Disabled" in titles
+
+    def test_active_access_facet_has_self_rel(self, mock_empty_search):
+        data = client.get("/search?query=test&access=print_disabled").json()
+        access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Access")
+        pd_link = next(l for l in access_facet["links"] if l["title"] == "Print Disabled")
+        assert pd_link["rel"] == "self"
+
+    def test_general_access_is_default_active(self, mock_empty_search):
+        data = client.get("/search?query=test").json()
+        access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Access")
+        general_link = next(l for l in access_facet["links"] if l["title"] == "General")
+        assert general_link.get("rel") == "self"
 
 
 # ---------------------------------------------------------------------------
@@ -522,14 +555,14 @@ class TestMediaTypeFacet:
         client.get("/search?query=test&media_type=audiobook")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "everything"},
-            language=None, title=None, require_cover=False, media_type="audiobook",
+            language=None, title=None, require_cover=False, media_type="audiobook", access=None,
         )
 
     def test_ebook_media_type_forwarded(self, mock_empty_search):
         client.get("/search?query=test&media_type=ebook")
         mock_empty_search.assert_called_once_with(
             query="test", limit=25, offset=0, sort=None, facets={"mode": "everything"},
-            language=None, title=None, require_cover=False, media_type="ebook",
+            language=None, title=None, require_cover=False, media_type="ebook", access=None,
         )
 
     def test_media_type_in_build_facets_call(self, mock_empty_search):
@@ -801,6 +834,7 @@ class TestOpdsAuthors:
         assert "Availability" in facet_titles
         assert "Language" in facet_titles
         assert "Media Type" in facet_titles
+        assert "Access" in facet_titles
 
     def test_author_availability_facet_no_buyable(self):
         record = _make_record()
@@ -990,3 +1024,258 @@ class TestAuthorNotFound:
         exc = AuthorNotFound("OL123A")
         assert str(exc) == "Author not found: OL123A"
         assert exc.author_olid == "OL123A"
+
+
+# ---------------------------------------------------------------------------
+# Issue #75: Smart description fallback
+# ---------------------------------------------------------------------------
+
+class TestSmartDescriptionFallback:
+    def _make_record_with_desc(self, edition_desc=None, work_desc=None, lang=None):
+        from pyopds2_openlibrary import OpenLibraryDataRecord
+        doc: dict = {
+            "key": "/works/OL1W",
+            "title": "Test Book",
+            "editions": {
+                "numFound": 1, "start": 0, "numFoundExact": True,
+                "docs": [{"key": "/books/OL1M", "title": "Test Book"}],
+            },
+        }
+        if work_desc:
+            doc["description"] = work_desc
+        if lang:
+            doc["editions"]["docs"][0]["language"] = lang
+        if edition_desc:
+            doc["editions"]["docs"][0]["description"] = edition_desc
+        return OpenLibraryDataRecord.model_validate(doc)
+
+    def test_edition_description_used_when_present(self):
+        record = self._make_record_with_desc(edition_desc="Edition desc.", work_desc="Work desc.", lang=["eng"])
+        assert record.metadata().description == "Edition desc."
+
+    def test_work_description_fallback_for_english(self):
+        record = self._make_record_with_desc(work_desc="Work desc.", lang=["eng"])
+        assert record.metadata().description == "Work desc."
+
+    def test_no_fallback_for_non_english(self):
+        record = self._make_record_with_desc(work_desc="Work desc.", lang=["fre"])
+        assert record.metadata().description is None
+
+    def test_no_fallback_when_no_work_desc(self):
+        record = self._make_record_with_desc(lang=["eng"])
+        assert record.metadata().description is None
+
+    def test_no_fallback_when_no_language(self):
+        record = self._make_record_with_desc(work_desc="Work desc.")
+        assert record.metadata().description is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #76: Group descriptions
+# ---------------------------------------------------------------------------
+
+class TestGroupDescriptions:
+    def test_standard_ebooks_group_has_description(self, mock_single_record):
+        # Standard Ebooks is the last group — scan all pages until we find it.
+        num_pages = 3
+        se_group = None
+        for p in range(1, num_pages + 1):
+            data = client.get(f"/?page={p}").json()
+            se_group = next(
+                (g for g in data.get("groups", []) if g.get("metadata", {}).get("title") == "Standard Ebooks"),
+                None,
+            )
+            if se_group:
+                break
+        assert se_group is not None, "Standard Ebooks group not found on any homepage page"
+        assert se_group["metadata"].get("description") is not None
+        assert "Standard Ebooks" in se_group["metadata"]["description"]
+
+    def test_group_descriptions_dict_has_standard_ebooks(self):
+        from pyopds2_openlibrary import _GROUP_DESCRIPTIONS
+        assert "Standard Ebooks" in _GROUP_DESCRIPTIONS
+        assert len(_GROUP_DESCRIPTIONS["Standard Ebooks"]) > 10
+
+    def test_group_descriptions_dict_has_classic_books(self):
+        from pyopds2_openlibrary import _GROUP_DESCRIPTIONS
+        assert "Classic Books" in _GROUP_DESCRIPTIONS
+        assert len(_GROUP_DESCRIPTIONS["Classic Books"]) > 10
+
+    def test_group_descriptions_dict_has_kids(self):
+        from pyopds2_openlibrary import _GROUP_DESCRIPTIONS
+        assert "Kids" in _GROUP_DESCRIPTIONS
+        assert len(_GROUP_DESCRIPTIONS["Kids"]) > 10
+
+
+# ---------------------------------------------------------------------------
+# Issue #73: Access facet post-filter
+# ---------------------------------------------------------------------------
+
+class TestAccessFilter:
+    def test_printdisabled_records_excluded_by_default(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider, OpenLibraryDataRecord
+
+        pd_record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL2W", "title": "Print Disabled Book",
+            "ebook_access": "printdisabled",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL2M", "title": "PD Book",
+                                   "ebook_access": "printdisabled",
+                                   "providers": [{"provider_name": "ia", "url": "https://archive.org/x"}],
+                                   "ia": ["someident"], "cover_i": 1}]},
+        })
+        borrowable_record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL3W", "title": "Borrowable Book",
+            "ebook_access": "borrowable",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL3M", "title": "Borrow Book",
+                                   "ebook_access": "borrowable",
+                                   "providers": [{"provider_name": "ia", "url": "https://archive.org/y"}],
+                                   "ia": ["otherid"], "cover_i": 2}]},
+        })
+
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {
+                "docs": [pd_record.model_dump(), borrowable_record.model_dump()],
+                "numFound": 2,
+            }
+            resp = OpenLibraryDataProvider.search(
+                query="test", require_cover=False, access=None,
+            )
+        titles = [r.title for r in resp.records]
+        assert "Borrowable Book" in titles
+        assert "Print Disabled Book" not in titles
+
+    def test_printdisabled_records_shown_with_access_param(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider, OpenLibraryDataRecord
+
+        pd_record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL2W", "title": "Print Disabled Book",
+            "ebook_access": "printdisabled",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL2M", "title": "PD Book",
+                                   "ebook_access": "printdisabled",
+                                   "providers": [{"provider_name": "ia", "url": "https://archive.org/x"}],
+                                   "ia": ["someident"], "cover_i": 1}]},
+        })
+
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {
+                "docs": [pd_record.model_dump()],
+                "numFound": 1,
+            }
+            resp = OpenLibraryDataProvider.search(
+                query="test", require_cover=False, access="print_disabled",
+            )
+        titles = [r.title for r in resp.records]
+        assert "Print Disabled Book" in titles
+
+    def test_access_param_forwarded_to_search_from_route(self, mock_empty_search):
+        client.get("/search?query=test&access=print_disabled")
+        _, kwargs = mock_empty_search.call_args
+        assert kwargs.get("access") == "print_disabled"
+
+    def test_author_access_param_forwarded(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)) as mock_s:
+            client.get("/authors/OL1234A?access=print_disabled")
+        _, kwargs = mock_s.call_args
+        assert kwargs.get("access") == "print_disabled"
+
+    def test_access_facet_links_preserve_current_access(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A?access=print_disabled&mode=ebooks").json()
+        access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Access")
+        pd_link = next(l for l in access_facet["links"] if l["title"] == "Print Disabled")
+        assert "access=print_disabled" in pd_link["href"]
+
+    def _make_pd_and_borrowable(self):
+        from pyopds2_openlibrary import OpenLibraryDataRecord
+        pd = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL2W", "title": "Print Disabled Book",
+            "ebook_access": "printdisabled",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL2M", "title": "PD Book",
+                                   "ebook_access": "printdisabled",
+                                   "providers": [{"provider_name": "ia", "url": "https://archive.org/x"}],
+                                   "ia": ["someident"], "cover_i": 1}]},
+        })
+        borrowable = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL3W", "title": "Borrowable Book",
+            "ebook_access": "borrowable",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL3M", "title": "Borrow Book",
+                                   "ebook_access": "borrowable",
+                                   "providers": [{"provider_name": "ia", "url": "https://archive.org/y"}],
+                                   "ia": ["otherid"], "cover_i": 2}]},
+        })
+        return pd, borrowable
+
+    def test_printdisabled_excluded_with_ebooks_mode(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider
+        pd, borrowable = self._make_pd_and_borrowable()
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {
+                "docs": [pd.model_dump(), borrowable.model_dump()],
+                "numFound": 2,
+            }
+            resp = OpenLibraryDataProvider.search(
+                query="test", require_cover=False, access=None,
+                facets={"mode": "ebooks"},
+            )
+        titles = [r.title for r in resp.records]
+        assert "Borrowable Book" in titles
+        assert "Print Disabled Book" not in titles
+
+    def test_printdisabled_excluded_with_language_filter(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider
+        pd, borrowable = self._make_pd_and_borrowable()
+        with patch("pyopds2_openlibrary._get") as mock_get, \
+             patch("pyopds2_openlibrary.iso_639_1_to_marc", return_value="eng"):
+            mock_get.return_value.json.return_value = {
+                "docs": [pd.model_dump(), borrowable.model_dump()],
+                "numFound": 2,
+            }
+            resp = OpenLibraryDataProvider.search(
+                query="test", require_cover=False, access=None,
+                language="en",
+            )
+        titles = [r.title for r in resp.records]
+        assert "Borrowable Book" in titles
+        assert "Print Disabled Book" not in titles
+
+    def test_printdisabled_excluded_with_media_type_ebook(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider
+        pd, borrowable = self._make_pd_and_borrowable()
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {
+                "docs": [pd.model_dump(), borrowable.model_dump()],
+                "numFound": 2,
+            }
+            resp = OpenLibraryDataProvider.search(
+                query="test", require_cover=False, access=None,
+                media_type="ebook",
+            )
+        titles = [r.title for r in resp.records]
+        assert "Borrowable Book" in titles
+        assert "Print Disabled Book" not in titles
+
+    def test_printdisabled_excluded_with_all_facets_combined(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider
+        pd, borrowable = self._make_pd_and_borrowable()
+        with patch("pyopds2_openlibrary._get") as mock_get, \
+             patch("pyopds2_openlibrary.iso_639_1_to_marc", return_value="eng"):
+            mock_get.return_value.json.return_value = {
+                "docs": [pd.model_dump(), borrowable.model_dump()],
+                "numFound": 2,
+            }
+            resp = OpenLibraryDataProvider.search(
+                query="test", require_cover=False, access=None,
+                facets={"mode": "ebooks"}, language="en", media_type="ebook",
+            )
+        titles = [r.title for r in resp.records]
+        assert "Borrowable Book" in titles
+        assert "Print Disabled Book" not in titles
