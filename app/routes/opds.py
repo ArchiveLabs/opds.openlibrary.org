@@ -143,7 +143,7 @@ async def opds_home(
 ):
     logger.info("GET / client=%s language=%s page=%s media_type=%s access=%s", request.client, language, page, media_type, access)
     base = _base_url(request)
-    get_provider(base)
+    provider = get_provider(base)
 
     is_default = mode == "everything" and language is None and page == 1 and media_type is None and access is None
     ttl = TTL_HOME_DEFAULT if is_default else TTL_HOME_NONDEFAULT
