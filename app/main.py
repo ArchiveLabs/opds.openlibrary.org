@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 import os
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -11,15 +13,47 @@ from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
 from app.logger import get_logger
 from app.routes.opds import router as opds_router
 from app.sentry import init_sentry
+from app.config import ENVIRONMENT
 
 logger = get_logger(__name__)
 
 sentry_enabled = init_sentry()
 
 
+def _warm_language_cache() -> None:
+    """On startup: warm pyopds2_openlibrary's in-process language cache.
+
+    Tries Memcached first (fast, survives restarts). Falls back to fetching
+    from OL and storing the result in Memcached for the next startup.
+    """
+    import pyopds2_openlibrary as _ol
+    import app.cache as _cache
+
+    cached_data = _cache.cache_get(_cache.LANG_OPTIONS_KEY)
+    if cached_data:
+        _ol._languages_map_cache = cached_data["map"]
+        _ol._languages_names_cache = cached_data["names"]
+        _ol._languages_map_fetched_at = time.monotonic()
+        logger.info("language cache warmed from Memcached (%d languages)", len(cached_data["map"]))
+        return
+
+    try:
+        _ol.fetch_languages_map()
+        if _ol._languages_map_cache:
+            _cache.cache_set(_cache.LANG_OPTIONS_KEY, {
+                "map": _ol._languages_map_cache,
+                "names": _ol._languages_names_cache,
+            }, _cache.TTL_LANG_OPTIONS)
+            logger.info("language map fetched from OL on startup (%d languages)", len(_ol._languages_map_cache))
+    except Exception as exc:
+        logger.warning("could not warm language cache on startup: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("OPDS service starting up (sentry=%s)", sentry_enabled)
+    if ENVIRONMENT != "test":
+        await asyncio.to_thread(_warm_language_cache)
     yield
 
 

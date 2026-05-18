@@ -71,11 +71,18 @@ _FAKE_AVAILABILITY_COUNTS = {"everything": 100, "ebooks": 50, "open_access": 10,
 
 
 @pytest.fixture(autouse=True)
-def clear_home_cache():
-    """Clear the homepage cache between tests."""
-    opds_module._home_cache.clear()
+def clear_cache_state(monkeypatch):
+    """Simulate cold cache and suppress all Memcached I/O in tests."""
+    from app import cache as cache_module
+    cache_module._locks.clear()
+    monkeypatch.setattr(cache_module, "cache_get", lambda key: None)
+    monkeypatch.setattr(cache_module, "cache_set", lambda key, value, ttl: None)
+    # Patch distributed lock so tests don't attempt Memcached connections
+    # (client.add() returns False on no-server → 3s polling sleep per test call).
+    monkeypatch.setattr(cache_module, "_acquire_distributed_lock", lambda key, expire=30: True)
+    monkeypatch.setattr(cache_module, "_release_distributed_lock", lambda key: None)
     yield
-    opds_module._home_cache.clear()
+    cache_module._locks.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -582,43 +589,43 @@ class TestMediaTypeFacet:
 # ---------------------------------------------------------------------------
 
 class TestHomeCacheDevMode:
-    def test_cache_is_populated_in_production(self, mock_empty_search):
-        """Homepage response is cached in production mode."""
-        with patch("app.routes.opds.ENVIRONMENT", "production"):
+    def test_cache_miss_triggers_provider_and_stores(self, mock_empty_search):
+        """On cache MISS, provider is called and result is stored via cache_set."""
+        with patch("app.cache.cache_set") as mock_set:
+            # cache_get returns None (cold cache) from clear_cache_state fixture
             client.get("/")
-        assert len(opds_module._home_cache) == 1
-
-    def test_cache_is_not_populated_in_development(self, mock_empty_search):
-        """Homepage response is NOT cached in development mode."""
-        with patch("app.routes.opds.ENVIRONMENT", "development"):
-            client.get("/")
-        assert len(opds_module._home_cache) == 0
-
-    def test_cache_is_not_served_in_development(self, mock_empty_search):
-        """Cached entry is ignored when ENVIRONMENT=development."""
-        # Pre-populate the cache manually
-        opds_module._home_cache["http://testserver"] = (
-            float("inf"),
-            {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []},
-        )
-        with patch("app.routes.opds.ENVIRONMENT", "development"), \
-             patch("app.routes.opds.OPDS_BASE_URL", None):
-            resp = client.get("/")
-        # Should have hit the real handler, not returned the stale cache entry
-        assert resp.status_code == 200
         assert mock_empty_search.called
+        assert mock_set.called
+        key = mock_set.call_args[0][0]
+        assert key.startswith("opds:home:")
 
-    def test_cache_is_served_in_production(self, mock_empty_search):
-        """Cached entry IS served when ENVIRONMENT=production."""
-        opds_module._home_cache["http://testserver"] = (
-            float("inf"),
-            {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []},
-        )
-        with patch("app.routes.opds.ENVIRONMENT", "production"), \
-             patch("app.routes.opds.OPDS_BASE_URL", None):
+    def test_cache_hit_skips_provider(self, mock_empty_search):
+        """On cache HIT, provider is not called — cached dict returned directly."""
+        fake = {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []}
+        with patch("app.cache.cache_get", return_value=fake):
             resp = client.get("/")
         assert resp.status_code == 200
         assert not mock_empty_search.called
+
+    def test_default_params_use_longer_ttl(self, mock_empty_search):
+        """Default homepage params (no filters) use TTL_HOME_DEFAULT."""
+        from app import cache as cache_module
+        with patch("app.cache.cache_set") as mock_set:
+            client.get("/")
+        assert mock_set.called
+        ttl = mock_set.call_args[0][2]
+        expected = cache_module.TTL_HOME_DEFAULT
+        assert abs(ttl - expected) <= expected * 0.10 + 1
+
+    def test_non_default_params_use_shorter_ttl(self, mock_empty_search):
+        """Non-default homepage params use TTL_HOME_NONDEFAULT."""
+        from app import cache as cache_module
+        with patch("app.cache.cache_set") as mock_set:
+            client.get("/?language=fr")
+        assert mock_set.called
+        ttl = mock_set.call_args[0][2]
+        expected = cache_module.TTL_HOME_NONDEFAULT
+        assert abs(ttl - expected) <= expected * 0.10 + 1
 
 
 # ---------------------------------------------------------------------------

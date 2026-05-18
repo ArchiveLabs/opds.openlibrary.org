@@ -20,6 +20,14 @@ OL_USER_AGENT: str = os.environ.get(
 )
 OL_REQUEST_TIMEOUT: float = float(os.environ.get("OL_REQUEST_TIMEOUT", "30.0"))
 
+MEMCACHE_HOST: str = os.environ.get("MEMCACHE_HOST", "localhost")
+_memcache_port_raw = os.environ.get("MEMCACHE_PORT", "11211")
+try:
+    MEMCACHE_PORT: int = int(_memcache_port_raw)
+except ValueError:
+    raise ValueError(f"MEMCACHE_PORT must be an integer, got: {_memcache_port_raw!r}") from None
+CACHE_ENABLED: bool = os.environ.get("CACHE_ENABLED", "true").lower() == "true"
+
 SENTRY_DSN: str | None = os.environ.get(
     "SENTRY_DSN",
     "https://8d8cab445edc9b4e452ba06d0be46dcb@sentry.archive.org/73",
@@ -58,4 +66,7 @@ __all__ = [
     "ENVIRONMENT",
     "SENTRY_TRACES_SAMPLE_RATE",
     "SENTRY_PROFILE_SESSION_SAMPLE_RATE",
+    "MEMCACHE_HOST",
+    "MEMCACHE_PORT",
+    "CACHE_ENABLED",
 ]
