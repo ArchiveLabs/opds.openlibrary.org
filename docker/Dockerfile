@@ -9,7 +9,6 @@ COPY opds.openlibrary.org/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY opds.openlibrary.org/app/ ./app/
-COPY opds.openlibrary.org/pyopds2_openlibrary/ ./pyopds2_openlibrary/
 
 RUN groupadd --gid 1000 appuser \
     && useradd --uid 1000 --gid 1000 --no-create-home appuser
