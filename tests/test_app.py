@@ -14,9 +14,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app as fastapi_app
+from app.cache import NullCacheBackend, get_cache
 from pyopds2_openlibrary import OpenLibraryDataProvider
 from app.routes import opds as opds_module
+
+app = fastapi_app
 
 client = TestClient(app)
 
@@ -71,18 +74,11 @@ _FAKE_AVAILABILITY_COUNTS = {"everything": 100, "ebooks": 50, "open_access": 10,
 
 
 @pytest.fixture(autouse=True)
-def clear_cache_state(monkeypatch):
-    """Simulate cold cache and suppress all Memcached I/O in tests."""
-    from app import cache as cache_module
-    cache_module._locks.clear()
-    monkeypatch.setattr(cache_module, "cache_get", lambda key: None)
-    monkeypatch.setattr(cache_module, "cache_set", lambda key, value, ttl: None)
-    # Patch distributed lock so tests don't attempt Memcached connections
-    # (client.add() returns False on no-server → 3s polling sleep per test call).
-    monkeypatch.setattr(cache_module, "_acquire_distributed_lock", lambda key, expire=30: True)
-    monkeypatch.setattr(cache_module, "_release_distributed_lock", lambda key: None)
+def null_cache():
+    """Inject NullCacheBackend for all tests via FastAPI DI override."""
+    fastapi_app.dependency_overrides[get_cache] = NullCacheBackend
     yield
-    cache_module._locks.clear()
+    fastapi_app.dependency_overrides.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -588,42 +584,61 @@ class TestMediaTypeFacet:
 # Cache dev-mode bypass
 # ---------------------------------------------------------------------------
 
+class RecordingCacheBackend(NullCacheBackend):
+    def __init__(self):
+        self.cached_calls: list[tuple] = []  # (key, ttl)
+
+    async def cached(self, key: str, ttl: int, fetch):
+        self.cached_calls.append((key, ttl))
+        return await fetch()
+
+
+class HitCacheBackend(NullCacheBackend):
+    def __init__(self, data: dict):
+        self._data = data
+
+    async def cached(self, key: str, ttl: int, fetch):
+        return self._data
+
+
 class TestHomeCacheDevMode:
     def test_cache_miss_triggers_provider_and_stores(self, mock_empty_search):
-        """On cache MISS, provider is called and result is stored via cache_set."""
-        with patch("app.cache.cache_set") as mock_set:
-            # cache_get returns None (cold cache) from clear_cache_state fixture
-            client.get("/")
+        """On cache MISS, provider is called and result is passed through cached()."""
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/")
         assert mock_empty_search.called
-        assert mock_set.called
-        key = mock_set.call_args[0][0]
-        assert key.startswith("opds:home:")
+        assert any(k.startswith("opds:home:") for k, _ in rec.cached_calls)
 
     def test_cache_hit_skips_provider(self, mock_empty_search):
         """On cache HIT, provider is not called — cached dict returned directly."""
         fake = {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []}
-        with patch("app.cache.cache_get", return_value=fake):
-            resp = client.get("/")
+        fastapi_app.dependency_overrides[get_cache] = lambda: HitCacheBackend(fake)
+        resp = client.get("/")
         assert resp.status_code == 200
         assert not mock_empty_search.called
 
     def test_default_params_use_longer_ttl(self, mock_empty_search):
         """Default homepage params (no filters) use TTL_HOME_DEFAULT."""
         from app import cache as cache_module
-        with patch("app.cache.cache_set") as mock_set:
-            client.get("/")
-        assert mock_set.called
-        ttl = mock_set.call_args[0][2]
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/")
+        home_calls = [(k, t) for k, t in rec.cached_calls if k.startswith("opds:home:")]
+        assert home_calls
+        ttl = home_calls[0][1]
         expected = cache_module.TTL_HOME_DEFAULT
         assert abs(ttl - expected) <= expected * 0.10 + 1
 
     def test_non_default_params_use_shorter_ttl(self, mock_empty_search):
         """Non-default homepage params use TTL_HOME_NONDEFAULT."""
         from app import cache as cache_module
-        with patch("app.cache.cache_set") as mock_set:
-            client.get("/?language=fr")
-        assert mock_set.called
-        ttl = mock_set.call_args[0][2]
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/?language=fr")
+        home_calls = [(k, t) for k, t in rec.cached_calls if k.startswith("opds:home:")]
+        assert home_calls
+        ttl = home_calls[0][1]
         expected = cache_module.TTL_HOME_NONDEFAULT
         assert abs(ttl - expected) <= expected * 0.10 + 1
 
