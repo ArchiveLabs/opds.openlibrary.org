@@ -627,7 +627,7 @@ class TestHomeCacheDevMode:
         home_calls = [(k, t) for k, t in rec.cached_calls if k.startswith("opds:home:")]
         assert home_calls
         ttl = home_calls[0][1]
-        expected = cache_module.TTL_HOME_DEFAULT
+        expected = cache_module.TTL_HOME_DEFAULT_SECONDS
         assert abs(ttl - expected) <= expected * 0.10 + 1
 
     def test_non_default_params_use_shorter_ttl(self, mock_empty_search):
@@ -639,7 +639,7 @@ class TestHomeCacheDevMode:
         home_calls = [(k, t) for k, t in rec.cached_calls if k.startswith("opds:home:")]
         assert home_calls
         ttl = home_calls[0][1]
-        expected = cache_module.TTL_HOME_NONDEFAULT
+        expected = cache_module.TTL_HOME_NONDEFAULT_SECONDS
         assert abs(ttl - expected) <= expected * 0.10 + 1
 
 

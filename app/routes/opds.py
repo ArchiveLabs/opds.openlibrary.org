@@ -17,15 +17,13 @@ import pyopds2_openlibrary as _ol_module
 from app.cache import (
     CacheBackend,
     LANG_OPTIONS_KEY,
-    TTL_AUTHOR_BIO,
-    TTL_AUTHOR_CATALOG,
-    TTL_BOOK,
-    TTL_HOME_DEFAULT,
-    TTL_HOME_NONDEFAULT,
-    TTL_LANG_OPTIONS,
-    TTL_NOT_FOUND,
-    TTL_SEARCH,
-    TTL_TRENDING,
+    TTL_AUTHOR_BIO_SECONDS,
+    TTL_AUTHOR_CATALOG_SECONDS,
+    TTL_BOOK_SECONDS,
+    TTL_HOME_DEFAULT_SECONDS,
+    TTL_HOME_NONDEFAULT_SECONDS,
+    TTL_LANG_OPTIONS_SECONDS,
+    TTL_TRENDING_SECONDS,
     get_cache,
     make_key,
 )
@@ -149,7 +147,7 @@ async def opds_home(
     provider = get_provider(base)
 
     is_default = mode == "everything" and language is None and page == 1 and media_type is None and access is None
-    ttl = TTL_HOME_DEFAULT if is_default else TTL_HOME_NONDEFAULT
+    ttl = TTL_HOME_DEFAULT_SECONDS if is_default else TTL_HOME_NONDEFAULT_SECONDS
 
     # Each page cached separately — page is included in the key.
     home_key = make_key("home", {
@@ -178,7 +176,7 @@ async def opds_home(
             cache.set(LANG_OPTIONS_KEY, {
                 "map": _ol_module._languages_map_cache,
                 "names": _ol_module._languages_names_cache,
-            }, TTL_LANG_OPTIONS)
+            }, TTL_LANG_OPTIONS_SECONDS)
         return data
 
     async def _fetch_trending() -> dict:
@@ -217,7 +215,7 @@ async def opds_home(
     # Trending group overlaid at short TTL — only needed on pages that contain it.
     groups = data.get("groups", [])
     if any(g.get("metadata", {}).get("title") == "Trending Books" for g in groups):
-        fresh_trending = await cache.cached(trending_key, TTL_TRENDING, _fetch_trending)
+        fresh_trending = await cache.cached(trending_key, TTL_TRENDING_SECONDS, _fetch_trending)
         if fresh_trending:
             data = {**data, "groups": [
                 fresh_trending if g.get("metadata", {}).get("title") == "Trending Books" else g
@@ -245,12 +243,6 @@ async def opds_search(
     base = _base_url(request)
     provider = get_provider(base)
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
-
-    key = make_key("search", {
-        "base": base, "query": query, "limit": limit, "page": page, "sort": sort,
-        "mode": mode, "title": title, "language": language,
-        "media_type": media_type, "access": access,
-    })
 
     def _fetch_facet_counts_safe(q: str) -> dict:
         try:
@@ -307,7 +299,7 @@ async def opds_search(
         )
         return catalog.model_dump()
 
-    data = await cache.cached(key, TTL_SEARCH, _fetch)
+    data = await _fetch()
     return opds_response(data)
 
 
@@ -322,20 +314,15 @@ async def opds_books(
     provider = get_provider(base)
 
     key = make_key("book", {"edition_olid": edition_olid})
-    not_found_key = make_key("book_not_found", {"edition_olid": edition_olid})
-
-    if cache.get(not_found_key) is not None:
-        raise EditionNotFound(edition_olid)
 
     async def _fetch() -> dict:
         resp = await asyncio.to_thread(_search, provider, query=f"edition_key:{edition_olid}", require_cover=False)
         if not resp.records:
             logger.warning("edition not found: %s", edition_olid)
-            cache.set(not_found_key, {"not_found": True}, TTL_NOT_FOUND)
             raise EditionNotFound(edition_olid)
         return resp.records[0].to_publication().model_dump()
 
-    data = await cache.cached(key, TTL_BOOK, _fetch)
+    data = await cache.cached(key, TTL_BOOK_SECONDS, _fetch)
     return opds_pub_response(data)
 
 
@@ -355,10 +342,6 @@ async def opds_authors(
     base = _base_url(request)
     provider = get_provider(base)
 
-    author_not_found_key = make_key("author_not_found", {"olid": olid})
-    if cache.get(author_not_found_key) is not None:
-        raise AuthorNotFound(olid)
-
     bio_key = make_key("author_bio", {"olid": olid})
     catalog_key = make_key("author_catalog", {
         "base": base, "olid": olid, "page": page, "limit": limit, "mode": mode,
@@ -371,7 +354,7 @@ async def opds_authors(
 
     async def _fetch_catalog() -> dict:
         bio_data, search_response = await asyncio.gather(
-            cache.cached(bio_key, TTL_AUTHOR_BIO, _fetch_bio),
+            cache.cached(bio_key, TTL_AUTHOR_BIO_SECONDS, _fetch_bio),
             asyncio.to_thread(
                 _search, provider,
                 query=f"author_key:{olid}",
@@ -389,7 +372,6 @@ async def opds_authors(
         author_bio = bio_data["bio"]
 
         if not search_response.records and author_name is None and author_bio is None:
-            cache.set(author_not_found_key, {"not_found": True}, TTL_NOT_FOUND)
             raise AuthorNotFound(olid)
 
         def _author_page_href(p: int) -> str:
@@ -443,5 +425,5 @@ async def opds_authors(
         )
         return catalog.model_dump()
 
-    data = await cache.cached(catalog_key, TTL_AUTHOR_CATALOG, _fetch_catalog)
+    data = await cache.cached(catalog_key, TTL_AUTHOR_CATALOG_SECONDS, _fetch_catalog)
     return opds_response(data)

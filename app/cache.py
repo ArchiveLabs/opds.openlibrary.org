@@ -18,15 +18,13 @@ logger = get_logger(__name__)
 # TTL constants (module-level — pure data)
 # ---------------------------------------------------------------------------
 
-TTL_HOME_DEFAULT    = 30 * 60
-TTL_HOME_NONDEFAULT = 15 * 60
-TTL_TRENDING        = 5 * 60
-TTL_BOOK            = 6 * 60 * 60
-TTL_AUTHOR_BIO      = 24 * 60 * 60
-TTL_AUTHOR_CATALOG  = 1 * 60 * 60
-TTL_SEARCH          = 5 * 60
-TTL_LANG_OPTIONS    = 24 * 60 * 60
-TTL_NOT_FOUND       = 2 * 60
+TTL_HOME_DEFAULT_SECONDS    = 30 * 60
+TTL_HOME_NONDEFAULT_SECONDS = 15 * 60
+TTL_TRENDING_SECONDS        = 5 * 60
+TTL_BOOK_SECONDS            = 6 * 60 * 60
+TTL_AUTHOR_BIO_SECONDS      = 24 * 60 * 60
+TTL_AUTHOR_CATALOG_SECONDS  = 1 * 60 * 60
+TTL_LANG_OPTIONS_SECONDS    = 24 * 60 * 60
 
 LANG_OPTIONS_KEY = "opds:lang_options"
 
@@ -182,7 +180,7 @@ class MemcachedBackend:
             return None
         result = self._deserialize(raw)
         if result is None:
-            logger.info("cache MISS (decode error) key=%s", key)
+            logger.error("cache decode error key=%s", key)
             return None
         logger.info("cache HIT key=%s", key)
         return result
