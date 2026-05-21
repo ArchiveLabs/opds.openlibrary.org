@@ -1,15 +1,24 @@
 services:
+  memcached:
+    image: memcached:1.6-alpine
+    restart: unless-stopped
+    command: memcached -m 1024
+
   opds:
     build:
       context: ../
       dockerfile: opds.openlibrary.org/docker/Dockerfile
-    ports:
-      - "8080:8080"
     env_file:
       - path: .env
         required: false
     environment:
-      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-1}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-2}
+      - MEMCACHE_HOST=memcached
+      - MEMCACHE_PORT=11211
+    ports:
+      - "8080:8080"
+    depends_on:
+      - memcached
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

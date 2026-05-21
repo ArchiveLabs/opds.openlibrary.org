@@ -14,9 +14,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app as fastapi_app
+from app.cache import NullCacheBackend, get_cache
 from pyopds2_openlibrary import OpenLibraryDataProvider
 from app.routes import opds as opds_module
+
+app = fastapi_app
 
 client = TestClient(app)
 
@@ -71,11 +74,11 @@ _FAKE_AVAILABILITY_COUNTS = {"everything": 100, "ebooks": 50, "open_access": 10,
 
 
 @pytest.fixture(autouse=True)
-def clear_home_cache():
-    """Clear the homepage cache between tests."""
-    opds_module._home_cache.clear()
+def null_cache():
+    """Inject NullCacheBackend for all tests via FastAPI DI override."""
+    fastapi_app.dependency_overrides[get_cache] = NullCacheBackend
     yield
-    opds_module._home_cache.clear()
+    fastapi_app.dependency_overrides.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -581,44 +584,63 @@ class TestMediaTypeFacet:
 # Cache dev-mode bypass
 # ---------------------------------------------------------------------------
 
+class RecordingCacheBackend(NullCacheBackend):
+    def __init__(self):
+        self.cached_calls: list[tuple] = []  # (key, ttl)
+
+    async def cached(self, key: str, ttl: int, fetch):
+        self.cached_calls.append((key, ttl))
+        return await fetch()
+
+
+class HitCacheBackend(NullCacheBackend):
+    def __init__(self, data: dict):
+        self._data = data
+
+    async def cached(self, key: str, ttl: int, fetch):
+        return self._data
+
+
 class TestHomeCacheDevMode:
-    def test_cache_is_populated_in_production(self, mock_empty_search):
-        """Homepage response is cached in production mode."""
-        with patch("app.routes.opds.ENVIRONMENT", "production"):
-            client.get("/")
-        assert len(opds_module._home_cache) == 1
-
-    def test_cache_is_not_populated_in_development(self, mock_empty_search):
-        """Homepage response is NOT cached in development mode."""
-        with patch("app.routes.opds.ENVIRONMENT", "development"):
-            client.get("/")
-        assert len(opds_module._home_cache) == 0
-
-    def test_cache_is_not_served_in_development(self, mock_empty_search):
-        """Cached entry is ignored when ENVIRONMENT=development."""
-        # Pre-populate the cache manually
-        opds_module._home_cache["http://testserver"] = (
-            float("inf"),
-            {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []},
-        )
-        with patch("app.routes.opds.ENVIRONMENT", "development"), \
-             patch("app.routes.opds.OPDS_BASE_URL", None):
-            resp = client.get("/")
-        # Should have hit the real handler, not returned the stale cache entry
-        assert resp.status_code == 200
+    def test_cache_miss_triggers_provider_and_stores(self, mock_empty_search):
+        """On cache MISS, provider is called and result is passed through cached()."""
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/")
         assert mock_empty_search.called
+        assert any(k.startswith("opds:home:") for k, _ in rec.cached_calls)
 
-    def test_cache_is_served_in_production(self, mock_empty_search):
-        """Cached entry IS served when ENVIRONMENT=production."""
-        opds_module._home_cache["http://testserver"] = (
-            float("inf"),
-            {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []},
-        )
-        with patch("app.routes.opds.ENVIRONMENT", "production"), \
-             patch("app.routes.opds.OPDS_BASE_URL", None):
-            resp = client.get("/")
+    def test_cache_hit_skips_provider(self, mock_empty_search):
+        """On cache HIT, provider is not called — cached dict returned directly."""
+        fake = {"metadata": {"title": "Cached"}, "links": [], "groups": [], "navigation": []}
+        fastapi_app.dependency_overrides[get_cache] = lambda: HitCacheBackend(fake)
+        resp = client.get("/")
         assert resp.status_code == 200
         assert not mock_empty_search.called
+
+    def test_default_params_use_longer_ttl(self, mock_empty_search):
+        """Default homepage params (no filters) use TTL_HOME_DEFAULT."""
+        from app import cache as cache_module
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/")
+        home_calls = [(k, t) for k, t in rec.cached_calls if k.startswith("opds:home:")]
+        assert home_calls
+        ttl = home_calls[0][1]
+        expected = cache_module.TTL_HOME_DEFAULT_SECONDS
+        assert abs(ttl - expected) <= expected * 0.10 + 1
+
+    def test_non_default_params_use_shorter_ttl(self, mock_empty_search):
+        """Non-default homepage params use TTL_HOME_NONDEFAULT."""
+        from app import cache as cache_module
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/?language=fr")
+        home_calls = [(k, t) for k, t in rec.cached_calls if k.startswith("opds:home:")]
+        assert home_calls
+        ttl = home_calls[0][1]
+        expected = cache_module.TTL_HOME_NONDEFAULT_SECONDS
+        assert abs(ttl - expected) <= expected * 0.10 + 1
 
 
 # ---------------------------------------------------------------------------
