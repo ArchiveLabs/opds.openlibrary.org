@@ -592,12 +592,19 @@ class RecordingCacheBackend(NullCacheBackend):
         self.cached_calls.append((key, ttl))
         return await fetch()
 
+    async def cached_swr(self, key: str, fresh_ttl: int, stale_ttl: int, fetch):
+        self.cached_calls.append((key, fresh_ttl))
+        return await fetch()
+
 
 class HitCacheBackend(NullCacheBackend):
     def __init__(self, data: dict):
         self._data = data
 
     async def cached(self, key: str, ttl: int, fetch):
+        return self._data
+
+    async def cached_swr(self, key: str, fresh_ttl: int, stale_ttl: int, fetch):
         return self._data
 
 
