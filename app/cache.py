@@ -171,25 +171,32 @@ class MemcachedBackend:
     # ------------------------------------------------------------------
 
     def get(self, key: str) -> dict | None:
-        client = self._get_client()
-        if client is None:
+        try:
+            client = self._get_client()
+            if client is None:
+                return None
+            raw = client.get(key)
+            if raw is None:
+                logger.info("cache MISS key=%s", key)
+                return None
+            result = self._deserialize(raw)
+            if result is None:
+                logger.error("cache decode error key=%s", key)
+                return None
+            logger.info("cache HIT key=%s", key)
+            return result
+        except Exception as exc:
+            logger.warning("cache get failed key=%s: %s", key, exc)
             return None
-        raw = client.get(key)
-        if raw is None:
-            logger.info("cache MISS key=%s", key)
-            return None
-        result = self._deserialize(raw)
-        if result is None:
-            logger.error("cache decode error key=%s", key)
-            return None
-        logger.info("cache HIT key=%s", key)
-        return result
 
     def set(self, key: str, value: dict, ttl: int) -> None:
-        client = self._get_client()
-        if client is None:
-            return
-        client.set(key, self._serialize(value), expire=_jitter(ttl))
+        try:
+            client = self._get_client()
+            if client is None:
+                return
+            client.set(key, self._serialize(value), expire=_jitter(ttl))
+        except Exception as exc:
+            logger.warning("cache set failed key=%s: %s", key, exc)
 
     async def cached(
         self,
@@ -197,33 +204,41 @@ class MemcachedBackend:
         ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
     ) -> dict:
-        result = self.get(key)
-        if result is not None:
-            return result
-
-        async with self._locks.setdefault(key, asyncio.Lock()):
+        fetch_started = False
+        try:
             result = self.get(key)
             if result is not None:
                 return result
 
-            got_distributed_lock = self._acquire_distributed_lock(key)
-            if not got_distributed_lock:
-                # Another worker holds the lock — poll until it fills the cache or times out.
-                # 15 × 200ms = 3s max wait, covers typical OL API response times.
-                for _ in range(15):
-                    await asyncio.sleep(0.2)
-                    result = self.get(key)
-                    if result is not None:
-                        return result
-                # Lock holder took >3s or crashed — fall through and fetch.
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                result = self.get(key)
+                if result is not None:
+                    return result
 
-            try:
-                result = await fetch()
+                got_distributed_lock = self._acquire_distributed_lock(key)
+                if not got_distributed_lock:
+                    # Another worker holds the lock — poll until it fills the cache or times out.
+                    # 15 × 200ms = 3s max wait, covers typical OL API response times.
+                    for _ in range(15):
+                        await asyncio.sleep(0.2)
+                        result = self.get(key)
+                        if result is not None:
+                            return result
+                    # Lock holder took >3s or crashed — fall through and fetch.
+
+                try:
+                    fetch_started = True
+                    result = await fetch()
+                finally:
+                    if got_distributed_lock:
+                        self._release_distributed_lock(key)
                 self.set(key, result, ttl)
                 return result
-            finally:
-                if got_distributed_lock:
-                    self._release_distributed_lock(key)
+        except Exception as exc:
+            if fetch_started:
+                raise  # real upstream error — let it propagate
+            logger.warning("cache layer failed key=%s, bypassing: %s", key, exc)
+            return await fetch()
 
 
 # ---------------------------------------------------------------------------
