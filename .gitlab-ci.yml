@@ -1,9 +1,12 @@
 variables:
   ENVIRONMENT: 'production'
-  NOMAD_VAR_PORTS: '{ 8080 = "http", 11211 = "memcached" }'
+  NOMAD_VAR_PORTS: '{ 8080 = "http" }'
   NOMAD_VAR_CHECK_PATH: '/health'
-  NOMAD_VAR_MULTI_CONTAINER: 'true'
+  NOMAD_VAR_MULTI_CONTAINER: 'false'
+  NOMAD_VAR_NETWORK_MODE: 'host'
   CACHE_ENABLED: 'true'
+  MEMCACHE_HOST: '127.0.0.1'
+  MEMCACHE_PORT: '11211'
 
 include:
   - remote: 'https://nomad.archive.org/ci.yml'
