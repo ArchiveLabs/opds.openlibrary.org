@@ -1,5 +1,5 @@
 task "memcached" {
-  driver = "podman"
+  driver = "docker"
 
   lifecycle {
     hook    = "prestart"
