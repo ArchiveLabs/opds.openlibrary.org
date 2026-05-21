@@ -174,7 +174,11 @@ class MemcachedBackend:
         client = self._get_client()
         if client is None:
             return None
-        raw = client.get(key)
+        try:
+            raw = client.get(key)
+        except Exception as exc:
+            logger.warning("cache get error key=%s: %s", key, exc)
+            return None
         if raw is None:
             logger.info("cache MISS key=%s", key)
             return None
@@ -189,7 +193,10 @@ class MemcachedBackend:
         client = self._get_client()
         if client is None:
             return
-        client.set(key, self._serialize(value), expire=_jitter(ttl))
+        try:
+            client.set(key, self._serialize(value), expire=_jitter(ttl))
+        except Exception as exc:
+            logger.warning("cache set error key=%s: %s", key, exc)
 
     async def cached(
         self,
