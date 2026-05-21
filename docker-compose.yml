@@ -2,7 +2,7 @@ services:
   memcached:
     image: memcached:1.6-alpine
     restart: unless-stopped
-    command: memcached -m 128
+    command: memcached -m 1024
 
   opds:
     build:
@@ -15,6 +15,8 @@ services:
       - WEB_CONCURRENCY=${WEB_CONCURRENCY:-2}
       - MEMCACHE_HOST=memcached
       - MEMCACHE_PORT=11211
+    ports:
+      - "8080:8080"
     depends_on:
       - memcached
     restart: unless-stopped
@@ -23,24 +25,4 @@ services:
       interval: 30s
       timeout: 5s
       start_period: 10s
-      retries: 3
-
-  nginx:
-    image: nginx:1.27-alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/upstream.conf:/etc/nginx/conf.d/upstream.conf:ro
-      - ./nginx/rate_limit.conf:/etc/nginx/conf.d/rate_limit.conf:ro
-      - ./nginx/proxy_params.conf:/etc/nginx/conf.d/proxy_params.conf:ro
-      - ./nginx/opds.conf:/etc/nginx/conf.d/opds.conf:ro
-    depends_on:
-      - opds
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 5s
       retries: 3

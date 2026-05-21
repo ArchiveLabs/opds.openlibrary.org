@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import logging
-import os
 import time
 
 from fastapi import FastAPI, HTTPException, Request
@@ -63,6 +62,9 @@ app = FastAPI(
     description="Stand-alone OPDS 2.0 feed for Open Library",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 
@@ -105,8 +107,7 @@ def health():
 
 @app.get("/sentry-debug", include_in_schema=False)
 def sentry_debug():
-    # Evaluate env at request time so tests and CI overrides are honored.
-    if os.getenv("ENVIRONMENT", "development") == "production":
+    if ENVIRONMENT == "production":
         raise HTTPException(status_code=404, detail="Not Found")
     1 / 0
 
