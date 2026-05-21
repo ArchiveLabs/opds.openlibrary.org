@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+import os
 import time
 
 from fastapi import FastAPI, HTTPException, Request
@@ -107,7 +108,7 @@ def health():
 
 @app.get("/sentry-debug", include_in_schema=False)
 def sentry_debug():
-    if ENVIRONMENT == "production":
+    if os.getenv("ENVIRONMENT", "production") == "production":
         raise HTTPException(status_code=404, detail="Not Found")
     1 / 0
 
