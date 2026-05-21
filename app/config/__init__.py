@@ -20,8 +20,8 @@ OL_USER_AGENT: str = os.environ.get(
 )
 OL_REQUEST_TIMEOUT: float = float(os.environ.get("OL_REQUEST_TIMEOUT", "30.0"))
 
-MEMCACHE_HOST: str = os.environ.get("MEMCACHE_HOST", "localhost")
-_memcache_port_raw = os.environ.get("MEMCACHE_PORT", "11211")
+MEMCACHE_HOST: str = os.environ.get("MEMCACHE_HOST") or os.environ.get("NOMAD_IP_memcached", "localhost")
+_memcache_port_raw = os.environ.get("MEMCACHE_PORT") or os.environ.get("NOMAD_PORT_memcached", "11211")
 try:
     MEMCACHE_PORT: int = int(_memcache_port_raw)
 except ValueError:

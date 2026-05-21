@@ -1,5 +1,5 @@
 task "memcached" {
-  driver = "docker"
+  driver = "podman"
 
   lifecycle {
     hook    = "prestart"
@@ -8,6 +8,7 @@ task "memcached" {
 
   config {
     image   = "memcached:1.6-alpine"
+    ports   = ["memcached"]
     command = "memcached"
     args    = ["-m", "1024"]
   }
