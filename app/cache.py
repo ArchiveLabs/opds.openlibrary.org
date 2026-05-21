@@ -204,33 +204,37 @@ class MemcachedBackend:
         ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
     ) -> dict:
-        result = self.get(key)
-        if result is not None:
-            return result
-
-        async with self._locks.setdefault(key, asyncio.Lock()):
+        try:
             result = self.get(key)
             if result is not None:
                 return result
 
-            got_distributed_lock = self._acquire_distributed_lock(key)
-            if not got_distributed_lock:
-                # Another worker holds the lock — poll until it fills the cache or times out.
-                # 15 × 200ms = 3s max wait, covers typical OL API response times.
-                for _ in range(15):
-                    await asyncio.sleep(0.2)
-                    result = self.get(key)
-                    if result is not None:
-                        return result
-                # Lock holder took >3s or crashed — fall through and fetch.
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                result = self.get(key)
+                if result is not None:
+                    return result
 
-            try:
-                result = await fetch()
-                self.set(key, result, ttl)
-                return result
-            finally:
-                if got_distributed_lock:
-                    self._release_distributed_lock(key)
+                got_distributed_lock = self._acquire_distributed_lock(key)
+                if not got_distributed_lock:
+                    # Another worker holds the lock — poll until it fills the cache or times out.
+                    # 15 × 200ms = 3s max wait, covers typical OL API response times.
+                    for _ in range(15):
+                        await asyncio.sleep(0.2)
+                        result = self.get(key)
+                        if result is not None:
+                            return result
+                    # Lock holder took >3s or crashed — fall through and fetch.
+
+                try:
+                    result = await fetch()
+                    self.set(key, result, ttl)
+                    return result
+                finally:
+                    if got_distributed_lock:
+                        self._release_distributed_lock(key)
+        except Exception as exc:
+            logger.warning("cache layer failed key=%s: %s — fetching uncached", key, exc)
+            return await fetch()
 
 
 # ---------------------------------------------------------------------------
