@@ -22,6 +22,16 @@ OL_REQUEST_TIMEOUT: float = float(os.environ.get("OL_REQUEST_TIMEOUT", "30.0"))
 
 MEMCACHE_HOST: str = os.environ.get("MEMCACHE_HOST") or os.environ.get("NOMAD_IP_memcached", "localhost")
 _memcache_port_raw = os.environ.get("MEMCACHE_PORT") or os.environ.get("NOMAD_PORT_memcached", "11211")
+
+import sys as _sys
+print(
+    f"[config] MEMCACHE_HOST={MEMCACHE_HOST!r} "
+    f"MEMCACHE_PORT={_memcache_port_raw!r} "
+    f"NOMAD_IP_memcached={os.environ.get('NOMAD_IP_memcached')!r} "
+    f"NOMAD_PORT_memcached={os.environ.get('NOMAD_PORT_memcached')!r}",
+    file=_sys.stderr,
+    flush=True,
+)
 try:
     MEMCACHE_PORT: int = int(_memcache_port_raw)
 except ValueError:

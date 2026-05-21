@@ -113,6 +113,7 @@ class MemcachedBackend:
     def _get_client(self) -> PooledClient | None:
         if self._client is not None:
             return self._client
+        logger.info("memcached connecting to %s:%s", MEMCACHE_HOST, MEMCACHE_PORT)
         try:
             self._client = PooledClient(
                 (MEMCACHE_HOST, MEMCACHE_PORT),
