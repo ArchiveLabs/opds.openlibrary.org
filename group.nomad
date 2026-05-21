@@ -7,11 +7,9 @@ task "memcached" {
   }
 
   config {
-    image        = "memcached:1.6-alpine"
-    network_mode = "bridge"
-    ports        = ["memcached"]
-    command      = "memcached"
-    args         = ["-m", "1024", "-l", "0.0.0.0"]
+    image = "memcached:1.6-alpine"
+    ports = ["memcached"]
+    args  = ["-m", "1024"]
   }
 
   resources {
