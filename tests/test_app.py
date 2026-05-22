@@ -592,6 +592,10 @@ class RecordingCacheBackend(NullCacheBackend):
         self.cached_calls.append((key, ttl))
         return await fetch()
 
+    async def cached_swr(self, key: str, fresh_ttl: int, stale_ttl: int, fetch):
+        self.cached_calls.append((key, fresh_ttl))
+        return await fetch()
+
 
 class HitCacheBackend(NullCacheBackend):
     def __init__(self, data: dict):
@@ -600,6 +604,12 @@ class HitCacheBackend(NullCacheBackend):
     async def cached(self, key: str, ttl: int, fetch):
         return self._data
 
+<<<<<<< HEAD
+=======
+    async def cached_swr(self, key: str, fresh_ttl: int, stale_ttl: int, fetch):
+        return self._data
+
+>>>>>>> main
 
 class TestHomeCacheDevMode:
     def test_cache_miss_triggers_provider_and_stores(self, mock_empty_search):
