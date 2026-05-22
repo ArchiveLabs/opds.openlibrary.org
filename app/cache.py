@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import random
+import time
 import zlib
 from typing import Any, Callable, Coroutine, Protocol, runtime_checkable
 
@@ -25,6 +26,12 @@ TTL_BOOK_SECONDS            = 6 * 60 * 60
 TTL_AUTHOR_BIO_SECONDS      = 24 * 60 * 60
 TTL_AUTHOR_CATALOG_SECONDS  = 1 * 60 * 60
 TTL_LANG_OPTIONS_SECONDS    = 24 * 60 * 60
+
+# Stale-while-revalidate windows: after fresh_ttl elapses, served value is
+# returned immediately and a background refresh kicks off. stale_ttl caps how
+# long the stale value survives if no traffic triggers refresh.
+TTL_HOME_DEFAULT_STALE_SECONDS = 30 * 60
+TTL_TRENDING_STALE_SECONDS     = 10 * 60
 
 LANG_OPTIONS_KEY = "opds:lang_options"
 
@@ -66,6 +73,14 @@ class CacheBackend(Protocol):
         fetch: Callable[[], Coroutine[Any, Any, dict]],
     ) -> dict: ...
 
+    async def cached_swr(
+        self,
+        key: str,
+        fresh_ttl: int,
+        stale_ttl: int,
+        fetch: Callable[[], Coroutine[Any, Any, dict]],
+    ) -> dict: ...
+
 
 # ---------------------------------------------------------------------------
 # NullCacheBackend — no-op, used when CACHE_ENABLED=false or in tests
@@ -88,6 +103,15 @@ class NullCacheBackend:
     ) -> dict:
         return await fetch()
 
+    async def cached_swr(
+        self,
+        key: str,
+        fresh_ttl: int,
+        stale_ttl: int,
+        fetch: Callable[[], Coroutine[Any, Any, dict]],
+    ) -> dict:
+        return await fetch()
+
 
 # ---------------------------------------------------------------------------
 # MemcachedBackend — production backend with stampede protection
@@ -105,6 +129,7 @@ class MemcachedBackend:
         self._client: PooledClient | None = None
         self._client_failed: bool = False
         self._locks: dict[str, asyncio.Lock] = {}
+        self._refreshing: set[str] = set()
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -113,6 +138,7 @@ class MemcachedBackend:
     def _get_client(self) -> PooledClient | None:
         if self._client is not None:
             return self._client
+        logger.info("memcached connecting to %s:%s", MEMCACHE_HOST, MEMCACHE_PORT)
         try:
             self._client = PooledClient(
                 (MEMCACHE_HOST, MEMCACHE_PORT),
@@ -174,7 +200,11 @@ class MemcachedBackend:
         client = self._get_client()
         if client is None:
             return None
-        raw = client.get(key)
+        try:
+            raw = client.get(key)
+        except Exception as exc:
+            logger.warning("cache get error key=%s: %s", key, exc)
+            return None
         if raw is None:
             logger.info("cache MISS key=%s", key)
             return None
@@ -189,7 +219,10 @@ class MemcachedBackend:
         client = self._get_client()
         if client is None:
             return
-        client.set(key, self._serialize(value), expire=_jitter(ttl))
+        try:
+            client.set(key, self._serialize(value), expire=_jitter(ttl))
+        except Exception as exc:
+            logger.warning("cache set error key=%s: %s", key, exc)
 
     async def cached(
         self,
@@ -197,33 +230,110 @@ class MemcachedBackend:
         ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
     ) -> dict:
-        result = self.get(key)
-        if result is not None:
-            return result
-
-        async with self._locks.setdefault(key, asyncio.Lock()):
+        try:
             result = self.get(key)
             if result is not None:
                 return result
 
-            got_distributed_lock = self._acquire_distributed_lock(key)
-            if not got_distributed_lock:
-                # Another worker holds the lock — poll until it fills the cache or times out.
-                # 15 × 200ms = 3s max wait, covers typical OL API response times.
-                for _ in range(15):
-                    await asyncio.sleep(0.2)
-                    result = self.get(key)
-                    if result is not None:
-                        return result
-                # Lock holder took >3s or crashed — fall through and fetch.
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                result = self.get(key)
+                if result is not None:
+                    return result
 
+                got_distributed_lock = self._acquire_distributed_lock(key)
+                if not got_distributed_lock:
+                    # Another worker holds the lock — poll until it fills the cache or times out.
+                    # 15 × 200ms = 3s max wait, covers typical OL API response times.
+                    for _ in range(15):
+                        await asyncio.sleep(0.2)
+                        result = self.get(key)
+                        if result is not None:
+                            return result
+                    # Lock holder took >3s or crashed — fall through and fetch.
+
+                try:
+                    result = await fetch()
+                    self.set(key, result, ttl)
+                    return result
+                finally:
+                    if got_distributed_lock:
+                        self._release_distributed_lock(key)
+        except Exception as exc:
+            logger.warning("cache layer failed key=%s: %s — fetching uncached", key, exc)
+            return await fetch()
+
+    # ------------------------------------------------------------------
+    # Stale-while-revalidate
+    # ------------------------------------------------------------------
+
+    def _set_swr(self, key: str, value: dict, fresh_ttl: int, stale_ttl: int) -> None:
+        self.set(key, {"v": value, "exp": time.time() + fresh_ttl}, stale_ttl)
+
+    async def _refresh_in_background(
+        self,
+        key: str,
+        fresh_ttl: int,
+        stale_ttl: int,
+        fetch: Callable[[], Coroutine[Any, Any, dict]],
+    ) -> None:
+        try:
+            if not self._acquire_distributed_lock(key, expire=max(fresh_ttl, 30)):
+                return
             try:
-                result = await fetch()
-                self.set(key, result, ttl)
-                return result
+                fresh = await fetch()
+                self._set_swr(key, fresh, fresh_ttl, stale_ttl)
             finally:
-                if got_distributed_lock:
-                    self._release_distributed_lock(key)
+                self._release_distributed_lock(key)
+        except Exception as exc:
+            logger.warning("cache swr refresh failed key=%s: %s", key, exc)
+        finally:
+            self._refreshing.discard(key)
+
+    async def cached_swr(
+        self,
+        key: str,
+        fresh_ttl: int,
+        stale_ttl: int,
+        fetch: Callable[[], Coroutine[Any, Any, dict]],
+    ) -> dict:
+        """Stale-while-revalidate. Hot/stale hits return immediately; stale hits
+        spawn a background refresh. Misses block-fetch with stampede protection.
+        """
+        try:
+            wrapped = self.get(key)
+            if isinstance(wrapped, dict) and "v" in wrapped:
+                if time.time() < wrapped.get("exp", 0):
+                    return wrapped["v"]
+                if key not in self._refreshing:
+                    self._refreshing.add(key)
+                    asyncio.create_task(
+                        self._refresh_in_background(key, fresh_ttl, stale_ttl, fetch)
+                    )
+                return wrapped["v"]
+
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                wrapped = self.get(key)
+                if isinstance(wrapped, dict) and "v" in wrapped:
+                    return wrapped["v"]
+
+                got_lock = self._acquire_distributed_lock(key)
+                if not got_lock:
+                    for _ in range(15):
+                        await asyncio.sleep(0.2)
+                        wrapped = self.get(key)
+                        if isinstance(wrapped, dict) and "v" in wrapped:
+                            return wrapped["v"]
+
+                try:
+                    result = await fetch()
+                    self._set_swr(key, result, fresh_ttl, stale_ttl)
+                    return result
+                finally:
+                    if got_lock:
+                        self._release_distributed_lock(key)
+        except Exception as exc:
+            logger.warning("cache swr failed key=%s: %s — fetching uncached", key, exc)
+            return await fetch()
 
 
 # ---------------------------------------------------------------------------
