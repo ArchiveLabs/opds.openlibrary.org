@@ -211,15 +211,6 @@ async def opds_home(
         )
         return group_catalog.model_dump()
 
-<<<<<<< HEAD
-    # Full page cached at long TTL (stable carousels).
-    data = await cache.cached(home_key, ttl, _fetch_full)
-
-    # Trending group overlaid at short TTL — only needed on pages that contain it.
-    groups = data.get("groups", [])
-    if any(g.get("metadata", {}).get("title") == "Trending Books" for g in groups):
-        fresh_trending = await cache.cached(trending_key, TTL_TRENDING_SECONDS, _fetch_trending)
-=======
     # Full page served via stale-while-revalidate for default mode (hot path);
     # other variants stay on plain TTL since they are cold and rarely hit twice.
     if is_default:
@@ -235,7 +226,6 @@ async def opds_home(
         fresh_trending = await cache.cached_swr(
             trending_key, TTL_TRENDING_SECONDS, TTL_TRENDING_STALE_SECONDS, _fetch_trending
         )
->>>>>>> main
         if fresh_trending:
             data = {**data, "groups": [
                 fresh_trending if g.get("metadata", {}).get("title") == "Trending Books" else g
