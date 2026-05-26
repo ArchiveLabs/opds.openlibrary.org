@@ -37,6 +37,10 @@ LANG_OPTIONS_KEY = "opds:lang_options"
 
 _COMPRESSION_THRESHOLD = 10240  # 10 KB
 
+# Backoff window after a memcached op fails. Prevents per-request reconnect storms
+# when memcached is down. New connection attempts gated by monotonic clock.
+_MEMCACHE_RECONNECT_BACKOFF_SECONDS = 5.0
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers (module-level — no state)
@@ -71,6 +75,7 @@ class CacheBackend(Protocol):
         key: str,
         ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
     ) -> dict: ...
 
     async def cached_swr(
@@ -79,6 +84,7 @@ class CacheBackend(Protocol):
         fresh_ttl: int,
         stale_ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
     ) -> dict: ...
 
 
@@ -100,6 +106,7 @@ class NullCacheBackend:
         key: str,
         ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
     ) -> dict:
         return await fetch()
 
@@ -109,6 +116,7 @@ class NullCacheBackend:
         fresh_ttl: int,
         stale_ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
     ) -> dict:
         return await fetch()
 
@@ -127,7 +135,7 @@ class MemcachedBackend:
 
     def __init__(self) -> None:
         self._client: PooledClient | None = None
-        self._client_failed: bool = False
+        self._reconnect_after: float = 0.0
         self._locks: dict[str, asyncio.Lock] = {}
         self._refreshing: set[str] = set()
 
@@ -138,6 +146,8 @@ class MemcachedBackend:
     def _get_client(self) -> PooledClient | None:
         if self._client is not None:
             return self._client
+        if time.monotonic() < self._reconnect_after:
+            return None
         logger.info("memcached connecting to %s:%s", MEMCACHE_HOST, MEMCACHE_PORT)
         try:
             self._client = PooledClient(
@@ -149,13 +159,26 @@ class MemcachedBackend:
             )
             return self._client
         except Exception as exc:
-            if not self._client_failed:
-                logger.warning(
-                    "Memcached unavailable (%s:%s): %s — running without cache",
-                    MEMCACHE_HOST, MEMCACHE_PORT, exc,
-                )
-                self._client_failed = True
+            self._invalidate_client(exc)
             return None
+
+    def _invalidate_client(self, exc: BaseException) -> None:
+        """Drop the cached client and arm reconnect backoff after an op failure.
+
+        ``PooledClient(ignore_exc=True)`` does not catch raw socket errors like
+        ``ConnectionRefusedError`` raised by ``_connect``. When memcached is
+        unreachable, every request retries the same broken pool. Resetting the
+        client forces a rebuild after the backoff window — calls in between
+        skip memcached and run uncached.
+        """
+        was_active = self._client is not None
+        self._client = None
+        self._reconnect_after = time.monotonic() + _MEMCACHE_RECONNECT_BACKOFF_SECONDS
+        if was_active:
+            logger.warning(
+                "Memcached op failed (%s:%s): %s — disabling cache for %.1fs",
+                MEMCACHE_HOST, MEMCACHE_PORT, exc, _MEMCACHE_RECONNECT_BACKOFF_SECONDS,
+            )
 
     def _serialize(self, value: dict) -> bytes:
         raw = json.dumps(value, separators=(",", ":")).encode()
@@ -180,7 +203,8 @@ class MemcachedBackend:
             return True  # no Memcached → act as if we own the lock
         try:
             return bool(client.add(f"{key}:lock", b"1", expire=expire))
-        except Exception:
+        except Exception as exc:
+            self._invalidate_client(exc)
             return True  # unexpected failure → fall through, accept possible double-fetch
 
     def _release_distributed_lock(self, key: str) -> None:
@@ -189,8 +213,8 @@ class MemcachedBackend:
             return
         try:
             client.delete(f"{key}:lock")
-        except Exception:
-            pass  # TTL will clean it up
+        except Exception as exc:
+            self._invalidate_client(exc)  # TTL will clean up the lock entry
 
     # ------------------------------------------------------------------
     # Public interface
@@ -204,6 +228,7 @@ class MemcachedBackend:
             raw = client.get(key)
         except Exception as exc:
             logger.warning("cache get error key=%s: %s", key, exc)
+            self._invalidate_client(exc)
             return None
         if raw is None:
             logger.info("cache MISS key=%s", key)
@@ -223,22 +248,54 @@ class MemcachedBackend:
             client.set(key, self._serialize(value), expire=_jitter(ttl))
         except Exception as exc:
             logger.warning("cache set error key=%s: %s", key, exc)
+            self._invalidate_client(exc)
+
+    def _delete(self, key: str) -> None:
+        """Best-effort delete used to evict invalid cache entries."""
+        client = self._get_client()
+        if client is None:
+            return
+        try:
+            client.delete(key)
+        except Exception as exc:
+            logger.warning("cache delete error key=%s: %s", key, exc)
+            self._invalidate_client(exc)
 
     async def cached(
         self,
         key: str,
         ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
     ) -> dict:
+        """Cache-or-fetch with optional value validation.
+
+        When ``is_valid`` is supplied it gates both cache reads and writes:
+        a HIT that fails validation is treated as a MISS (and discarded so
+        future requests don't keep returning the poisoned entry), and a
+        fetched value that fails validation is returned to the caller but
+        never written to memcached. Prevents blank/error responses (e.g.
+        ``groups=[]`` from a transient upstream outage) from being pinned
+        for the full TTL.
+        """
+
+        def _valid(v: dict) -> bool:
+            return is_valid is None or is_valid(v)
+
         try:
             result = self.get(key)
-            if result is not None:
+            if result is not None and _valid(result):
                 return result
+            if result is not None:
+                logger.info("cache invalid entry, discarding key=%s", key)
+                self._delete(key)
 
             async with self._locks.setdefault(key, asyncio.Lock()):
                 result = self.get(key)
-                if result is not None:
+                if result is not None and _valid(result):
                     return result
+                if result is not None:
+                    self._delete(key)
 
                 got_distributed_lock = self._acquire_distributed_lock(key)
                 if not got_distributed_lock:
@@ -247,13 +304,16 @@ class MemcachedBackend:
                     for _ in range(15):
                         await asyncio.sleep(0.2)
                         result = self.get(key)
-                        if result is not None:
+                        if result is not None and _valid(result):
                             return result
                     # Lock holder took >3s or crashed — fall through and fetch.
 
                 try:
                     result = await fetch()
-                    self.set(key, result, ttl)
+                    if _valid(result):
+                        self.set(key, result, ttl)
+                    else:
+                        logger.info("cache skip write (invalid result) key=%s", key)
                     return result
                 finally:
                     if got_distributed_lock:
@@ -275,13 +335,17 @@ class MemcachedBackend:
         fresh_ttl: int,
         stale_ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
     ) -> None:
         try:
             if not self._acquire_distributed_lock(key, expire=max(fresh_ttl, 30)):
                 return
             try:
                 fresh = await fetch()
-                self._set_swr(key, fresh, fresh_ttl, stale_ttl)
+                if is_valid is None or is_valid(fresh):
+                    self._set_swr(key, fresh, fresh_ttl, stale_ttl)
+                else:
+                    logger.info("cache swr skip write (invalid refresh) key=%s", key)
             finally:
                 self._release_distributed_lock(key)
         except Exception as exc:
@@ -295,38 +359,56 @@ class MemcachedBackend:
         fresh_ttl: int,
         stale_ttl: int,
         fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
     ) -> dict:
         """Stale-while-revalidate. Hot/stale hits return immediately; stale hits
         spawn a background refresh. Misses block-fetch with stampede protection.
+
+        When ``is_valid`` is supplied, cache entries failing validation are
+        discarded on read and never written, so blank responses cannot poison
+        the cache for the full TTL.
         """
+
+        def _valid(v: dict) -> bool:
+            return is_valid is None or is_valid(v)
+
         try:
             wrapped = self.get(key)
             if isinstance(wrapped, dict) and "v" in wrapped:
-                if time.time() < wrapped.get("exp", 0):
+                if _valid(wrapped["v"]):
+                    if time.time() < wrapped.get("exp", 0):
+                        return wrapped["v"]
+                    if key not in self._refreshing:
+                        self._refreshing.add(key)
+                        asyncio.create_task(
+                            self._refresh_in_background(key, fresh_ttl, stale_ttl, fetch, is_valid)
+                        )
                     return wrapped["v"]
-                if key not in self._refreshing:
-                    self._refreshing.add(key)
-                    asyncio.create_task(
-                        self._refresh_in_background(key, fresh_ttl, stale_ttl, fetch)
-                    )
-                return wrapped["v"]
+                # Cached value is invalid (e.g. previously-poisoned blank entry) — evict and refetch.
+                logger.info("cache swr invalid entry, discarding key=%s", key)
+                self._delete(key)
 
             async with self._locks.setdefault(key, asyncio.Lock()):
                 wrapped = self.get(key)
-                if isinstance(wrapped, dict) and "v" in wrapped:
+                if isinstance(wrapped, dict) and "v" in wrapped and _valid(wrapped["v"]):
                     return wrapped["v"]
+                if isinstance(wrapped, dict) and "v" in wrapped:
+                    self._delete(key)
 
                 got_lock = self._acquire_distributed_lock(key)
                 if not got_lock:
                     for _ in range(15):
                         await asyncio.sleep(0.2)
                         wrapped = self.get(key)
-                        if isinstance(wrapped, dict) and "v" in wrapped:
+                        if isinstance(wrapped, dict) and "v" in wrapped and _valid(wrapped["v"]):
                             return wrapped["v"]
 
                 try:
                     result = await fetch()
-                    self._set_swr(key, result, fresh_ttl, stale_ttl)
+                    if _valid(result):
+                        self._set_swr(key, result, fresh_ttl, stale_ttl)
+                    else:
+                        logger.info("cache swr skip write (invalid result) key=%s", key)
                     return result
                 finally:
                     if got_lock:
