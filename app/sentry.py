@@ -12,9 +12,13 @@ from app.config import (
     SENTRY_TRACES_SAMPLE_RATE,
 )
 
+# Environment values that disable Sentry. Both spellings are accepted so a stray
+# ENVIRONMENT=testing does not pollute Sentry with mock-injected test errors.
+_TEST_ENVIRONMENTS = frozenset({"test", "testing"})
+
 
 def init_sentry() -> bool:
-    if not SENTRY_DSN or ENVIRONMENT == "test":
+    if not SENTRY_DSN or ENVIRONMENT in _TEST_ENVIRONMENTS:
         return False
     sentry_sdk.init(
         dsn=SENTRY_DSN,
