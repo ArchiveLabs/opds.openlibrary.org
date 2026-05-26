@@ -211,20 +211,32 @@ async def opds_home(
         )
         return group_catalog.model_dump()
 
+    # Reject empty payloads — a homepage with no groups means every upstream
+    # group fetch failed (e.g. OL 403/500) and caching it would pin a blank
+    # response for the full TTL. A trending overlay without publications is
+    # equally useless. Validators run on both reads and writes.
+    def _home_is_valid(d: dict) -> bool:
+        return bool(d.get("groups"))
+
+    def _trending_is_valid(d: dict) -> bool:
+        return bool(d.get("publications"))
+
     # Full page served via stale-while-revalidate for default mode (hot path);
     # other variants stay on plain TTL since they are cold and rarely hit twice.
     if is_default:
         data = await cache.cached_swr(
-            home_key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, _fetch_full
+            home_key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, _fetch_full,
+            is_valid=_home_is_valid,
         )
     else:
-        data = await cache.cached(home_key, ttl, _fetch_full)
+        data = await cache.cached(home_key, ttl, _fetch_full, is_valid=_home_is_valid)
 
     # Trending group overlaid via SWR so the 60s refresh never blocks a user.
     groups = data.get("groups", [])
     if any(g.get("metadata", {}).get("title") == "Trending Books" for g in groups):
         fresh_trending = await cache.cached_swr(
-            trending_key, TTL_TRENDING_SECONDS, TTL_TRENDING_STALE_SECONDS, _fetch_trending
+            trending_key, TTL_TRENDING_SECONDS, TTL_TRENDING_STALE_SECONDS, _fetch_trending,
+            is_valid=_trending_is_valid,
         )
         if fresh_trending:
             data = {**data, "groups": [
