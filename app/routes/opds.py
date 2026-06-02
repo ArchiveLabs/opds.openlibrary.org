@@ -129,6 +129,26 @@ def _call_provider_compat(func, **kwargs):
     return func(**supported)
 
 
+def _safe_fetch_language_counts(**kwargs) -> dict:
+    """Call the provider's ``fetch_language_counts``, tolerating provider
+    versions that lack the method entirely.
+
+    Returns ``{}`` on a missing method or any error so the catalog degrades to
+    an unfiltered language list instead of 500ing — the same graceful-skew
+    philosophy as ``_call_provider_compat`` (which only covers signatures, not
+    missing attributes).
+    """
+    func = getattr(OpenLibraryDataProvider, "fetch_language_counts", None)
+    if func is None:
+        logger.warning("provider lacks fetch_language_counts; omitting language counts")
+        return {}
+    try:
+        return _call_provider_compat(func, **kwargs) or {}
+    except Exception as exc:
+        logger.warning("language count fetch failed, omitting: %s", exc)
+        return {}
+
+
 try:
     from pyopds2_openlibrary import _GROUP_DESCRIPTIONS as _OL_GROUP_DESCRIPTIONS
 except ImportError:
@@ -173,8 +193,8 @@ async def opds_home(
 
     async def _fetch_lang_counts() -> dict:
         counts = await asyncio.to_thread(
-            OpenLibraryDataProvider.fetch_language_counts,
-            "ebook_access:[* TO *]",
+            _safe_fetch_language_counts,
+            query="ebook_access:[* TO *]",
             mode=mode,
             media_type=media_type,
             access=access,
@@ -295,7 +315,12 @@ async def opds_search(
 
     def _fetch_facet_counts_safe(q: str) -> dict:
         try:
-            return OpenLibraryDataProvider.fetch_facet_counts(q, media_type=media_type, language=language)
+            # Via the compat shim so an older provider without the ``language``
+            # parameter still returns counts (unscoped) instead of erroring out.
+            return _call_provider_compat(
+                OpenLibraryDataProvider.fetch_facet_counts,
+                query=q, media_type=media_type, language=language,
+            )
         except Exception as exc:
             logger.warning("facet count fetch failed, omitting counts: %s", exc)
             return {}
@@ -306,8 +331,8 @@ async def opds_search(
 
     async def _fetch_search_lang_counts() -> dict:
         counts = await asyncio.to_thread(
-            OpenLibraryDataProvider.fetch_language_counts,
-            query, mode=mode, media_type=media_type, access=access,
+            _safe_fetch_language_counts,
+            query=query, mode=mode, media_type=media_type, access=access,
         )
         return {"counts": counts or {}}
 
