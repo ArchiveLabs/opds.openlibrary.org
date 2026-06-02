@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock, patch
+from urllib.parse import unquote_plus
 
 import httpx
 import pytest
@@ -19,12 +20,18 @@ from app.cache import NullCacheBackend, get_cache
 from pyopds2_openlibrary import OpenLibraryDataProvider
 from app.routes import opds as opds_module
 
+# Captured before any autouse patches fire so tests can opt back into the real
+# implementation without manual unpatching.
+_REAL_FETCH_LANG_COUNTS = OpenLibraryDataProvider.fetch_language_counts
+_REAL_FETCH_FACET_COUNTS = OpenLibraryDataProvider.fetch_facet_counts
+
 app = fastapi_app
 
 client = TestClient(app)
 
 SEARCH_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.search"
 FACET_COUNTS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.fetch_facet_counts"
+LANG_COUNTS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.fetch_language_counts"
 BUILD_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_facets"
 BUILD_HOME_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_home_facets"
 FETCH_AUTHOR_BIO_PATCH_TARGET = "app.routes.opds.fetch_author_bio"
@@ -85,6 +92,7 @@ def null_cache():
 def mock_facet_counts():
     """Always mock fetch_facet_counts and facet builders to prevent real HTTP calls."""
     with patch(FACET_COUNTS_PATCH_TARGET, create=True, return_value=_FAKE_AVAILABILITY_COUNTS.copy()), \
+         patch(LANG_COUNTS_PATCH_TARGET, create=True, return_value={}), \
          patch(BUILD_FACETS_PATCH_TARGET, create=True, return_value=[]), \
          patch(BUILD_HOME_FACETS_PATCH_TARGET, create=True, return_value=[]):
         yield
@@ -143,7 +151,7 @@ class TestOpdsHome:
         assert len(data.get("groups", [])) == 3
 
     def test_page3_groups(self, mock_single_record):
-        """Page 3 returns the remaining group."""
+        """Page 3 returns the remaining group (7 total English groups)."""
         data = client.get("/?page=3").json()
         assert len(data.get("groups", [])) == 1
 
@@ -234,6 +242,96 @@ class TestOpdsHome:
         for call in mock_empty_search.call_args_list:
             assert call.kwargs.get("language") == "en"
 
+    def test_home_limit_param_overrides_default(self, mock_empty_search):
+        """?limit=N on the home route overrides the language-default per-group cap."""
+        client.get("/?language=fr&limit=15")
+        group_calls = [c for c in mock_empty_search.call_args_list
+                       if c.kwargs.get("facets") is not None]
+        assert group_calls
+        for call in group_calls:
+            assert call.kwargs.get("limit") == 15
+
+    def test_home_limit_zero_keeps_language_default(self, mock_empty_search):
+        """?limit=0 (or omitted) falls back to language default: 25 EN, 100 non-EN."""
+        client.get("/?language=fr")
+        fr_calls = [c for c in mock_empty_search.call_args_list
+                    if c.kwargs.get("facets") is not None]
+        assert fr_calls
+        for call in fr_calls:
+            assert call.kwargs.get("limit") == 50
+        mock_empty_search.reset_mock()
+        client.get("/")
+        en_calls = [c for c in mock_empty_search.call_args_list
+                    if c.kwargs.get("facets") is not None]
+        assert en_calls
+        for call in en_calls:
+            assert call.kwargs.get("limit") == 25
+
+    def test_home_non_english_drops_require_cover(self, mock_empty_search):
+        """Non-English homepage groups use require_cover=False + larger limit
+        so subject carousels don't silently empty out."""
+        client.get("/?language=fr")
+        # build_home_feed.fetch_one passes language as a kwarg, so identify
+        # group-fetch calls by presence of "facets" + non-empty title.
+        group_calls = [c for c in mock_empty_search.call_args_list
+                       if c.kwargs.get("facets") is not None]
+        assert group_calls, "expected at least one group search call"
+        for call in group_calls:
+            assert call.kwargs.get("require_cover") is False
+            assert call.kwargs.get("limit") == 50
+
+    def test_home_english_keeps_require_cover_and_default_limit(self, mock_empty_search):
+        """English homepage keeps the cover requirement and 25-result limit."""
+        client.get("/?language=en")
+        group_calls = [c for c in mock_empty_search.call_args_list
+                       if c.kwargs.get("facets") is not None]
+        assert group_calls, "expected at least one group search call"
+        for call in group_calls:
+            assert call.kwargs.get("require_cover") is True
+            assert call.kwargs.get("limit") == 25
+
+    def test_home_non_english_drops_year_filter_on_romance(self):
+        """Non-English Romance/Textbooks groups drop the English year window."""
+        from pyopds2_openlibrary import OpenLibraryDataProvider
+        en_groups = OpenLibraryDataProvider._home_groups_config(language="en")
+        fr_groups = OpenLibraryDataProvider._home_groups_config(language="fr")
+        en_romance = next(g for g in en_groups if g[0] == "Romance")
+        fr_romance = next(g for g in fr_groups if g[0] == "Romance")
+        assert "first_publish_year:[1930 TO *]" in en_romance[1]
+        assert "first_publish_year:[1930 TO *]" not in fr_romance[1]
+        en_tb = next(g for g in en_groups if g[0] == "Textbooks")
+        fr_tb = next(g for g in fr_groups if g[0] == "Textbooks")
+        assert "publish_year:[1990 TO *]" in en_tb[1]
+        assert "publish_year:[1990 TO *]" not in fr_tb[1]
+
+    def test_home_groups_config_keeps_all_groups_regardless_of_corpus_size(self):
+        """Even a tiny-corpus language gets all 6 non-English groups attempted —
+        the empty-publications filter at the end of build_home_feed is what
+        drops carousels that come back zero. Pruning by corpus size was removed
+        because it hid groups that would have filled fine for mid-tier languages."""
+        from pyopds2_openlibrary import OpenLibraryDataProvider
+        tiny = OpenLibraryDataProvider._home_groups_config(
+            language="xx", language_counts={"xx": 50},
+        )
+        large = OpenLibraryDataProvider._home_groups_config(
+            language="fr", language_counts={"fr": 352111},
+        )
+        expected = {"Trending Books", "Classic Books", "Romance",
+                    "Kids", "Thrillers", "Textbooks"}
+        assert expected <= {g[0] for g in tiny}
+        assert expected <= {g[0] for g in large}
+
+    def test_home_groups_config_english_ignores_counts(self):
+        """English path never prunes — even with a deliberately tiny count."""
+        from pyopds2_openlibrary import OpenLibraryDataProvider
+        groups = OpenLibraryDataProvider._home_groups_config(
+            language="en", language_counts={"en": 5},
+        )
+        titles = [g[0] for g in groups]
+        for required in ("Trending Books", "Classic Books", "Romance",
+                         "Kids", "Thrillers", "Textbooks", "Standard Ebooks"):
+            assert required in titles
+
     def test_upstream_error_omits_shelf(self):
         """If one shelf fails upstream, the rest still load."""
         call_count = 0
@@ -255,7 +353,9 @@ class TestOpdsHome:
             resp = client.get("/")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data.get("groups", [])) == 2
+        # All groups are fetched, the failed one is dropped, and the survivors
+        # are paginated — so page 1 still fills to GROUPS_PER_PAGE (3).
+        assert len(data.get("groups", [])) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +549,7 @@ class TestSearchModes:
 # Facets
 # ---------------------------------------------------------------------------
 
-def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, title=None, total=0, availability_counts=None, media_type=None, access=None):
+def _fake_facets(base_url="", query="test", sort=None, mode="everything", language=None, title=None, total=0, availability_counts=None, media_type=None, access=None, language_counts=None):
     """Return realistic facet data matching what build_facets now produces.
 
     Only the active mode/access link carries rel="self"; non-active links have no rel key,
@@ -1308,3 +1408,357 @@ class TestAccessFilter:
         titles = [r.title for r in resp.records]
         assert "Borrowable Book" in titles
         assert "Print Disabled Book" not in titles
+
+    def _make_public_record(self, edition_access: str = "public"):
+        from pyopds2_openlibrary import OpenLibraryDataRecord
+        return OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL9W", "title": "Public Book",
+            "ebook_access": "public",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL9M", "title": "Public Edition",
+                                   "ebook_access": edition_access,
+                                   "providers": [{"provider_name": "ia", "url": "https://archive.org/p"}],
+                                   "ia": ["pubident"], "cover_i": 9}]},
+        })
+
+    def test_public_excluded_from_borrow_mode_when_query_has_ebook_access(self):
+        """Standard Ebooks scenario: query bakes in ebook_access:public, user
+        selects Available to Borrow. Mode must win — zero results expected."""
+        from pyopds2_openlibrary import OpenLibraryDataProvider
+        public = self._make_public_record()
+        captured: dict = {}
+
+        def fake_get(url, params=None, **kwargs):
+            captured["q"] = (params or {}).get("q")
+            mock = MagicMock()
+            mock.json.return_value = {"docs": [public.model_dump()], "numFound": 1}
+            return mock
+
+        with patch("pyopds2_openlibrary._get", side_effect=fake_get):
+            resp = OpenLibraryDataProvider.search(
+                query='publisher:"Standard Ebooks" ebook_access:public',
+                require_cover=False, access=None,
+                facets={"mode": "ebooks"},
+            )
+        # Solr query must have been rewritten so ebook_access:public was
+        # replaced with the borrow range — otherwise mode is silently ignored.
+        assert "ebook_access:public" not in captured["q"]
+        assert "ebook_access:(borrowable OR printdisabled)" in captured["q"]
+        # Post-filter must strip the public record even if Solr returned it.
+        assert resp.records == []
+
+    def test_public_edition_excluded_from_borrow_mode_when_work_is_borrowable(self):
+        """Displayed-edition rule: work=borrowable but the surfaced edition is
+        public — must not appear under Available to Borrow because the user
+        would see an open-access book."""
+        from pyopds2_openlibrary import OpenLibraryDataRecord, OpenLibraryDataProvider
+        record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL10W", "title": "Mixed Book",
+            "ebook_access": "borrowable",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL10M", "title": "Public Edition",
+                                   "ebook_access": "public",
+                                   "providers": [{"provider_name": "ia", "url": "https://archive.org/m"}],
+                                   "ia": ["mixedid"], "cover_i": 10}]},
+        })
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {
+                "docs": [record.model_dump()], "numFound": 1,
+            }
+            resp = OpenLibraryDataProvider.search(
+                query="test", require_cover=False, access=None,
+                facets={"mode": "ebooks"},
+            )
+        assert resp.records == []
+
+
+class TestLanguageFacetCounts:
+    """Language facet must hide zero-count languages and surface counts."""
+
+    @staticmethod
+    def _seed_language_map():
+        """Seed in-process language caches with a tiny known map for tests."""
+        import pyopds2_openlibrary as m
+        m._languages_map_cache = {"eng": "en", "fre": "fr", "spa": "es"}
+        m._languages_names_cache = {"en": "English", "fr": "French", "es": "Spanish"}
+        m._languages_map_fetched_at = 9e18  # far future; never refetch
+        m._iso_to_marc_cache.clear()
+        m._iso_to_marc_cache.update({"en": "eng", "fr": "fre", "es": "spa"})
+
+    def test_build_language_links_hides_zero_count_languages(self):
+        from pyopds2_openlibrary import _build_language_links
+        self._seed_language_map()
+        links = _build_language_links(
+            language=None,
+            href_fn=lambda c: f"/?language={c}" if c else "/",
+            counts={"en": 100, "es": 50},  # fr omitted → count 0 → hidden
+        )
+        titles = [l["title"] for l in links]
+        assert "All" in titles
+        assert "English" in titles
+        assert "Spanish" in titles
+        assert "French" not in titles
+
+    def test_build_language_links_shows_count_in_properties(self):
+        from pyopds2_openlibrary import _build_language_links
+        self._seed_language_map()
+        links = _build_language_links(
+            language=None,
+            href_fn=lambda c: f"/?language={c}" if c else "/",
+            counts={"en": 100, "fr": 7},
+        )
+        by_title = {l["title"]: l for l in links}
+        assert by_title["English"]["properties"]["numberOfItems"] == 100
+        assert by_title["French"]["properties"]["numberOfItems"] == 7
+
+    def test_build_language_links_falls_back_when_counts_none(self):
+        """No counts available → emit full language list (back-compat path)."""
+        from pyopds2_openlibrary import _build_language_links
+        self._seed_language_map()
+        links = _build_language_links(
+            language=None,
+            href_fn=lambda c: f"/?language={c}" if c else "/",
+            counts=None,
+        )
+        titles = {l["title"] for l in links}
+        assert {"All", "English", "French", "Spanish"} <= titles
+
+    def test_build_language_links_keeps_active_language_even_if_zero(self):
+        """Active language must always be emitted so the UI can show it as selected."""
+        from pyopds2_openlibrary import _build_language_links
+        self._seed_language_map()
+        links = _build_language_links(
+            language="fr",
+            href_fn=lambda c: f"/?language={c}" if c else "/",
+            counts={"en": 100},  # fr count is 0
+        )
+        fr = next((l for l in links if l["title"] == "French"), None)
+        assert fr is not None
+        assert fr.get("rel") == "self"
+
+    def test_fetch_language_counts_parses_languages_endpoint(self):
+        self._seed_language_map()
+        with patch(LANG_COUNTS_PATCH_TARGET, _REAL_FETCH_LANG_COUNTS), \
+             patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = [
+                {"name": "English", "marc_code": "eng", "ebook_edition_count": 123},
+                {"name": "French", "marc_code": "fre", "ebook_edition_count": 45},
+                {"name": "Spanish", "marc_code": "spa", "ebook_edition_count": 7},
+                {"name": "Pali", "marc_code": "pli", "ebook_edition_count": 0},
+            ]
+            counts = OpenLibraryDataProvider.fetch_language_counts()
+        assert counts == {"en": 123, "fr": 45, "es": 7}
+
+    def test_fetch_language_counts_returns_none_on_error(self):
+        with patch(LANG_COUNTS_PATCH_TARGET, _REAL_FETCH_LANG_COUNTS), \
+             patch("pyopds2_openlibrary._get", side_effect=RuntimeError("boom")):
+            counts = OpenLibraryDataProvider.fetch_language_counts("q", mode="ebooks")
+        assert counts is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #87: language/availability/media-type facet consistency
+# ---------------------------------------------------------------------------
+
+# Servable floor for mode=everything: only books OL can serve over OPDS
+# (an ebook of some kind), excluding the lexicographically-adjacent ``no_ebook``
+# (print-only) value that an unfiltered query would otherwise return.
+_EVERYTHING_FLOOR = "ebook_access:(borrowable OR printdisabled OR public)"
+
+
+class TestEverythingModeServableFloor:
+    """Bug 2: mode=everything returned print-only works that were then dropped
+    by _has_acquisition_options, leaving an empty feed with an inflated total."""
+
+    def test_everything_search_query_floors_to_servable(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as P
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {"docs": [], "numFound": 0}
+            P.search(query="subject:fiction", facets={"mode": "everything"}, require_cover=False)
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert _EVERYTHING_FLOOR in q
+
+    def test_everything_count_query_floors_to_servable(self):
+        """_count_for_mode must apply the same floor so the Everything badge
+        matches the (now servable-only) result total."""
+        from pyopds2_openlibrary import OpenLibraryDataProvider as P
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {"numFound": 3}
+            P._count_for_mode("subject:fiction", "everything")
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert _EVERYTHING_FLOOR in q
+
+
+class TestFacetCountsLanguage:
+    """Bug 1: per-mode availability counts ignored the active language filter,
+    so a subset mode (open_access) could report a larger count than the
+    superset (everything)."""
+
+    def test_count_for_mode_adds_language_clause(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as P
+        with patch("pyopds2_openlibrary._get") as mock_get, \
+             patch("pyopds2_openlibrary.iso_639_1_to_marc", return_value="zul"):
+            mock_get.return_value.json.return_value = {"numFound": 5}
+            P._count_for_mode("subject:fiction", "open_access", language="zu")
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "language:zul" in q
+
+    def test_fetch_facet_counts_threads_language(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as P
+        seen: list = []
+
+        def fake(query, mode, language=None):
+            seen.append((mode, language))
+            return 1
+
+        # Restore the real fetch_facet_counts (the autouse fixture mocks it).
+        with patch(FACET_COUNTS_PATCH_TARGET, _REAL_FETCH_FACET_COUNTS), \
+             patch.object(P, "_count_for_mode", side_effect=fake):
+            P.fetch_facet_counts("subject:fiction", language="zu")
+        # Every counted (non-buyable) mode must carry the language.
+        assert seen and all(lang == "zu" for _, lang in seen)
+
+    def test_search_route_passes_language_to_facet_counts(self):
+        captured: dict = {}
+
+        def fake_counts(query, media_type=None, language=None):
+            captured["language"] = language
+            return _FAKE_AVAILABILITY_COUNTS.copy()
+
+        with patch(SEARCH_PATCH_TARGET, return_value=_make_search_response()), \
+             patch(FACET_COUNTS_PATCH_TARGET, side_effect=fake_counts):
+            client.get("/search?query=test&language=zu")
+        assert captured.get("language") == "zu"
+
+
+class TestHomeEmptyGroupsFilteredBeforePagination:
+    """Bug 3: empty carousels were dropped *after* pagination, so a page whose
+    slice happened to contain empty groups (common for minority languages)
+    showed fewer than GROUPS_PER_PAGE carousels — typically only Trending."""
+
+    def test_non_empty_groups_fill_page_one(self):
+        rec = _make_record()
+
+        def fake_search(**kwargs):
+            # Simulate a minority-language corpus: only Trending + Kids fill.
+            if kwargs.get("title") in ("Trending Books", "Kids"):
+                return _make_search_response(records=[rec], total=1)
+            return _make_search_response()
+
+        with patch(SEARCH_PATCH_TARGET, side_effect=fake_search):
+            data = client.get("/?language=zu").json()
+        titles = [g["metadata"]["title"] for g in data.get("groups", [])]
+        # Both content-bearing groups must surface on page 1, with no empties.
+        assert "Trending Books" in titles
+        assert "Kids" in titles
+        assert all(t in ("Trending Books", "Kids") for t in titles)
+
+
+# ---------------------------------------------------------------------------
+# Issue #86: aggregateRating on publications
+# ---------------------------------------------------------------------------
+
+class TestAggregateRating:
+    def _rated_record(self, average=4.213573, count=1002):
+        from pyopds2_openlibrary import OpenLibraryDataRecord
+        data = {
+            "key": "/works/OL1W",
+            "title": "Rated Book",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL1M", "title": "Rated Book"}]},
+        }
+        if average is not None:
+            data["ratings_average"] = average
+        if count is not None:
+            data["ratings_count"] = count
+        return OpenLibraryDataRecord.model_validate(data)
+
+    def test_metadata_includes_full_aggregate_rating(self):
+        meta = self._rated_record().metadata().model_dump(by_alias=True, exclude_none=True)
+        ar = meta.get("aggregateRating")
+        assert ar == {
+            "@type": "AggregateRating",
+            "ratingValue": 4.21,   # rounded to 2 decimals
+            "ratingCount": 1002,
+            "bestRating": 5,
+            "worstRating": 1,
+        }
+
+    def test_no_aggregate_rating_when_count_zero(self):
+        meta = self._rated_record(average=0, count=0).metadata().model_dump(by_alias=True, exclude_none=True)
+        assert "aggregateRating" not in meta
+
+    def test_no_aggregate_rating_when_fields_absent(self):
+        meta = self._rated_record(average=None, count=None).metadata().model_dump(by_alias=True, exclude_none=True)
+        assert "aggregateRating" not in meta
+
+    def test_search_requests_rating_fields(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as P
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {"docs": [], "numFound": 0}
+            P.search(query="test", require_cover=False)
+        fields = mock_get.call_args.kwargs["params"]["fields"]
+        assert "ratings_average" in fields
+        assert "ratings_count" in fields
+
+
+# ---------------------------------------------------------------------------
+# Issue #85: subjects on publications
+# ---------------------------------------------------------------------------
+
+class TestPublicationSubjects:
+    def _record_with_subjects(self, subjects):
+        from pyopds2_openlibrary import OpenLibraryDataRecord
+        return OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL1W",
+            "title": "Subject Book",
+            "subject": subjects,
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL1M", "title": "Subject Book"}]},
+        })
+
+    def test_metadata_emits_subject_objects(self):
+        meta = self._record_with_subjects(["Historical fiction", "Fiction in translation"]) \
+            .metadata().model_dump(by_alias=True, exclude_none=True)
+        subs = meta.get("subject")
+        assert isinstance(subs, list) and len(subs) == 2
+        first = subs[0]
+        assert first["name"] == "Historical fiction"
+        link = first["links"][0]
+        assert link["type"] == "application/opds+json"
+        # Browse link is an in-app /search by subject name.
+        assert "/search?" in link["href"]
+        assert 'subject:"Historical fiction"' in unquote_plus(link["href"])
+
+    def test_subjects_capped_at_ten(self):
+        many = [f"Subject {i}" for i in range(25)]
+        meta = self._record_with_subjects(many).metadata().model_dump(by_alias=True, exclude_none=True)
+        subs = meta["subject"]
+        assert len(subs) == 10
+        assert [s["name"] for s in subs] == many[:10]
+
+    def test_no_subject_key_when_absent(self):
+        from pyopds2_openlibrary import OpenLibraryDataRecord
+        rec = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL1W", "title": "No Subjects",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL1M", "title": "No Subjects"}]},
+        })
+        meta = rec.metadata().model_dump(by_alias=True, exclude_none=True)
+        assert "subject" not in meta
+
+    def test_embedded_quote_does_not_break_query(self):
+        meta = self._record_with_subjects(['Quote " inside']) \
+            .metadata().model_dump(by_alias=True, exclude_none=True)
+        href = unquote_plus(meta["subject"][0]["links"][0]["href"])
+        # Exactly one opening and one closing quote around the value.
+        assert 'subject:"Quote  inside"' in href
+        # Name field keeps the original text.
+        assert meta["subject"][0]["name"] == 'Quote " inside'
+
+    def test_search_requests_subject_field(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as P
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {"docs": [], "numFound": 0}
+            P.search(query="test", require_cover=False)
+        assert "subject" in mock_get.call_args.kwargs["params"]["fields"]
