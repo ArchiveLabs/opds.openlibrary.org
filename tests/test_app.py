@@ -1762,3 +1762,30 @@ class TestPublicationSubjects:
             mock_get.return_value.json.return_value = {"docs": [], "numFound": 0}
             P.search(query="test", require_cover=False)
         assert "subject" in mock_get.call_args.kwargs["params"]["fields"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #88 follow-up: provider version skew must not 500 the catalog.
+# The deployed provider can lag the app's route code (e.g. missing
+# fetch_language_counts); routes must degrade gracefully, not crash.
+# ---------------------------------------------------------------------------
+
+class TestProviderVersionSkew:
+    def test_home_survives_missing_fetch_language_counts(self, mock_single_record):
+        # Simulate an older provider where the method is absent.
+        with patch.object(OpenLibraryDataProvider, "fetch_language_counts", None):
+            resp = client.get("/")
+        assert resp.status_code == 200
+        assert resp.json().get("groups")
+
+    def test_search_survives_missing_fetch_language_counts(self, mock_empty_search):
+        with patch.object(OpenLibraryDataProvider, "fetch_language_counts", None):
+            resp = client.get("/search?query=test")
+        assert resp.status_code == 200
+
+    def test_home_survives_fetch_language_counts_raising(self, mock_single_record):
+        def boom(*a, **k):
+            raise RuntimeError("upstream down")
+        with patch.object(OpenLibraryDataProvider, "fetch_language_counts", staticmethod(boom)):
+            resp = client.get("/")
+        assert resp.status_code == 200
