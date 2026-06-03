@@ -23,6 +23,7 @@ from app.cache import (
     TTL_HOME_DEFAULT_SECONDS,
     TTL_HOME_DEFAULT_STALE_SECONDS,
     TTL_HOME_NONDEFAULT_SECONDS,
+    TTL_LANG_COUNTS_SECONDS,
     TTL_LANG_OPTIONS_SECONDS,
     TTL_TRENDING_SECONDS,
     TTL_TRENDING_STALE_SECONDS,
@@ -128,6 +129,26 @@ def _call_provider_compat(func, **kwargs):
     return func(**supported)
 
 
+def _safe_fetch_language_counts(**kwargs) -> dict:
+    """Call the provider's ``fetch_language_counts``, tolerating provider
+    versions that lack the method entirely.
+
+    Returns ``{}`` on a missing method or any error so the catalog degrades to
+    an unfiltered language list instead of 500ing — the same graceful-skew
+    philosophy as ``_call_provider_compat`` (which only covers signatures, not
+    missing attributes).
+    """
+    func = getattr(OpenLibraryDataProvider, "fetch_language_counts", None)
+    if func is None:
+        logger.warning("provider lacks fetch_language_counts; omitting language counts")
+        return {}
+    try:
+        return _call_provider_compat(func, **kwargs) or {}
+    except Exception as exc:
+        logger.warning("language count fetch failed, omitting: %s", exc)
+        return {}
+
+
 try:
     from pyopds2_openlibrary import _GROUP_DESCRIPTIONS as _OL_GROUP_DESCRIPTIONS
 except ImportError:
@@ -142,9 +163,10 @@ async def opds_home(
     page: int = Query(default=1, ge=1, description="Group page (each page loads a batch of carousels)"),
     media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook. Omit for all."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
+    limit: int = Query(default=0, ge=0, le=100, description="Per-carousel publication count (0 = language default: 25 EN / 100 non-EN)."),
     cache: CacheBackend = Depends(get_cache),
 ):
-    logger.info("GET / client=%s language=%s page=%s media_type=%s access=%s", request.client, language, page, media_type, access)
+    logger.info("GET / client=%s language=%s page=%s media_type=%s access=%s limit=%s", request.client, language, page, media_type, access, limit)
     base = _base_url(request)
     provider = get_provider(base)
 
@@ -155,12 +177,34 @@ async def opds_home(
     home_key = make_key("home", {
         "base": base, "mode": mode, "language": language,
         "page": page, "media_type": media_type, "access": access,
+        "limit": limit,
     })
     # Trending group gets its own short-TTL key shared across pages/base variants.
     trending_key = make_key("home_trending", {
         "mode": mode, "language": language,
         "media_type": media_type, "access": access,
+        "limit": limit,
     })
+    # Language facet counts: one Solr facet call per (mode, media_type, access).
+    # Shared across home pages so paging the homepage doesn't re-fetch.
+    lang_counts_key = make_key("home_lang_counts", {
+        "mode": mode, "media_type": media_type, "access": access,
+    })
+
+    async def _fetch_lang_counts() -> dict:
+        counts = await asyncio.to_thread(
+            _safe_fetch_language_counts,
+            query="ebook_access:[* TO *]",
+            mode=mode,
+            media_type=media_type,
+            access=access,
+        )
+        return {"counts": counts or {}}
+
+    lang_counts_payload = await cache.cached(
+        lang_counts_key, TTL_LANG_COUNTS_SECONDS, _fetch_lang_counts,
+    )
+    language_counts = lang_counts_payload.get("counts") or None
 
     async def _fetch_full() -> dict:
         data = await asyncio.to_thread(
@@ -172,6 +216,8 @@ async def opds_home(
             page=page,
             media_type=media_type,
             access=access,
+            language_counts=language_counts,
+            limit=limit,
         )
         # Refresh language options in Memcached while we have fresh in-process data.
         if _ol_module._languages_map_cache:
@@ -192,12 +238,15 @@ async def opds_home(
         if not trending:
             return {}
         t_title, t_query, t_sort = trending
+        # Honor the user-supplied ``limit`` so the SWR-refreshed trending overlay
+        # stays the same shape as the rest of the page's carousels.
+        trending_limit = limit if limit > 0 else 25
         resp = await asyncio.to_thread(
             _search,
             provider,
             query=t_query,
             sort=t_sort,
-            limit=25,
+            limit=trending_limit,
             language=language,
             facets={"mode": mode},
             title=t_title,
@@ -221,15 +270,13 @@ async def opds_home(
     def _trending_is_valid(d: dict) -> bool:
         return bool(d.get("publications"))
 
-    # Full page served via stale-while-revalidate for default mode (hot path);
-    # other variants stay on plain TTL since they are cold and rarely hit twice.
-    if is_default:
-        data = await cache.cached_swr(
-            home_key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, _fetch_full,
-            is_valid=_home_is_valid,
-        )
-    else:
-        data = await cache.cached(home_key, ttl, _fetch_full, is_valid=_home_is_valid)
+    # Full page served via stale-while-revalidate for every variant. Cold OL
+    # Solr hits cost 30–40 s; serving the stale copy and refreshing in the
+    # background keeps language/mode/facet switches snappy after the first hit.
+    data = await cache.cached_swr(
+        home_key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, _fetch_full,
+        is_valid=_home_is_valid,
+    )
 
     # Trending group overlaid via SWR so the 60s refresh never blocks a user.
     groups = data.get("groups", [])
@@ -268,10 +315,31 @@ async def opds_search(
 
     def _fetch_facet_counts_safe(q: str) -> dict:
         try:
-            return OpenLibraryDataProvider.fetch_facet_counts(q, media_type=media_type)
+            # Via the compat shim so an older provider without the ``language``
+            # parameter still returns counts (unscoped) instead of erroring out.
+            return _call_provider_compat(
+                OpenLibraryDataProvider.fetch_facet_counts,
+                query=q, media_type=media_type, language=language,
+            )
         except Exception as exc:
             logger.warning("facet count fetch failed, omitting counts: %s", exc)
             return {}
+
+    lang_counts_key = make_key("search_lang_counts", {
+        "query": query, "mode": mode, "media_type": media_type, "access": access,
+    })
+
+    async def _fetch_search_lang_counts() -> dict:
+        counts = await asyncio.to_thread(
+            _safe_fetch_language_counts,
+            query=query, mode=mode, media_type=media_type, access=access,
+        )
+        return {"counts": counts or {}}
+
+    lang_counts_payload = await cache.cached(
+        lang_counts_key, TTL_LANG_COUNTS_SECONDS, _fetch_search_lang_counts,
+    )
+    language_counts = lang_counts_payload.get("counts") or None
 
     async def _fetch() -> dict:
         search_response, availability_counts = await asyncio.gather(
@@ -317,6 +385,7 @@ async def opds_search(
                 availability_counts=availability_counts,
                 media_type=media_type,
                 access=access,
+                language_counts=language_counts,
             ),
         )
         return catalog.model_dump()

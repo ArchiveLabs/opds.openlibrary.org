@@ -25,7 +25,12 @@ TTL_TRENDING_SECONDS        = 1 * 60
 TTL_BOOK_SECONDS            = 6 * 60 * 60
 TTL_AUTHOR_BIO_SECONDS      = 24 * 60 * 60
 TTL_AUTHOR_CATALOG_SECONDS  = 1 * 60 * 60
-TTL_LANG_OPTIONS_SECONDS    = 24 * 60 * 60
+TTL_LANG_OPTIONS_SECONDS    = 7 * 24 * 60 * 60   # 7 days
+# Language facet counts (ebook_edition_count per language) come from
+# ``languages.json`` and change glacially — at most a few new languages or
+# count jumps per week. 7 days is plenty; users still get fresh counts well
+# within a typical content-rotation cycle.
+TTL_LANG_COUNTS_SECONDS     = 7 * 24 * 60 * 60
 
 # Stale-while-revalidate windows: after fresh_ttl elapses, served value is
 # returned immediately and a background refresh kicks off. stale_ttl caps how
