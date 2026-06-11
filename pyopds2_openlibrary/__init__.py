@@ -66,6 +66,18 @@ Metadata.model_rebuild(force=True)
 Publication.model_rebuild(force=True)
 Catalog.model_rebuild(force=True)
 
+# Patch Metadata.identifier alias: pyopds2 uses alias="@id" (JSON-LD) but OPDS 2.0
+# clients expect the plain "identifier" key per the Readium webpub-manifest spec.
+# Pydantic v2 tracks alias, serialization_alias, and validation_alias separately;
+# all three must be updated so model_dump(by_alias=True) emits "identifier".
+_identifier_field = Metadata.model_fields['identifier']
+_identifier_field.alias = 'identifier'
+_identifier_field.serialization_alias = 'identifier'
+_identifier_field.validation_alias = 'identifier'
+Metadata.model_rebuild(force=True)
+Publication.model_rebuild(force=True)
+Catalog.model_rebuild(force=True)
+
 
 # Matches a single ``ebook_access:`` clause in a Solr query string —
 # either a bare value (``ebook_access:public``) or a range
@@ -152,6 +164,7 @@ class BookSharedDoc(BaseModel):
     ratings_count: Optional[int] = None
     # Subjects are work-level display names; editions carry none.
     subject: Optional[list[str]] = None
+    isbn: Optional[list[str]] = None
 
 
 class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
@@ -342,6 +355,13 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                 subjects.append(Subject(name=name, links=[Link(type="application/opds+json", href=href)]))
             subjects = subjects or None
 
+        isbn13: Optional[str] = None
+        if self.isbn:
+            for code in self.isbn:
+                if len(code) == 13 and code.startswith("97"):
+                    isbn13 = code
+                    break
+
         return Metadata(
             type=self.type,
             title=book.title or self.title or "Untitled",
@@ -353,6 +373,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             numberOfPages=self.number_of_pages_median,
             aggregateRating=aggregate_rating,
             subject=subjects,
+            identifier=f"urn:isbn:{isbn13}" if isbn13 else None,
         )
 
 class OpenLibraryLanguageStub(TypedDict):
@@ -2009,7 +2030,7 @@ class OpenLibraryDataProvider(DataProvider):
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
             "number_of_pages_median", "id_librivox", "ratings_average", "ratings_count",
-            "subject",
+            "subject", "isbn",
         ]
 
         internal_query = query

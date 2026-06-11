@@ -40,3 +40,26 @@ def test_images_both_covers_have_rel_cover():
 def test_images_none_when_no_cover():
     rec = _make_record({})
     assert rec.images() is None
+
+
+# ----- #95 identifier -----
+
+def test_identifier_set_from_isbn13():
+    rec = _make_record({"isbn": ["0439708184", "9780439708180", "9780439708197"]})
+    meta = rec.metadata()
+    dumped = meta.model_dump(by_alias=True)
+    assert dumped.get("identifier") == "urn:isbn:9780439708180"
+
+
+def test_identifier_skips_isbn10():
+    rec = _make_record({"isbn": ["0439708184"]})
+    meta = rec.metadata()
+    dumped = meta.model_dump(by_alias=True)
+    assert dumped.get("identifier") is None
+
+
+def test_identifier_absent_when_no_isbn():
+    rec = _make_record({})
+    meta = rec.metadata()
+    dumped = meta.model_dump(by_alias=True)
+    assert dumped.get("identifier") is None
