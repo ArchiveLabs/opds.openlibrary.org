@@ -63,3 +63,12 @@ def test_identifier_absent_when_no_isbn():
     meta = rec.metadata()
     dumped = meta.model_dump(by_alias=True)
     assert dumped.get("identifier") is None
+
+
+def test_identifier_rejects_non_isbn13_prefix():
+    # 970-977 prefixes are GS1 but not valid ISBN-13
+    rec = _make_record({"isbn": ["9700000000001", "9780439708180"]})
+    meta = rec.metadata()
+    dumped = meta.model_dump(by_alias=True)
+    # Should skip 970... and pick 978...
+    assert dumped.get("identifier") == "urn:isbn:9780439708180"

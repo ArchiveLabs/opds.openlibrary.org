@@ -358,7 +358,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         isbn13: Optional[str] = None
         if self.isbn:
             for code in self.isbn:
-                if len(code) == 13 and code.startswith("97"):
+                if len(code) == 13 and code[:3] in ("978", "979"):
                     isbn13 = code
                     break
 
