@@ -19,6 +19,14 @@ OL_USER_AGENT: str = os.environ.get(
     "OPDSBot/1.0 (opds.openlibrary.org; opds@openlibrary.org)",
 )
 OL_REQUEST_TIMEOUT: float = float(os.environ.get("OL_REQUEST_TIMEOUT", "30.0"))
+# Cap on concurrent outbound Open Library requests, enforced app-side (the
+# package itself stays throttle-free). Bounds the home build's fan-out + search
+# traffic so we don't trip OL's 429 rate limit.
+OL_MAX_CONCURRENT_REQUESTS: int = max(1, int(os.environ.get("OL_MAX_CONCURRENT_REQUESTS", "5")))
+# How many homepage group-pages to pre-warm (each home page is cached
+# separately). The default homepage spans ~3 pages (GROUPS_PER_PAGE=3), so
+# warming 1..N makes paging instant too. Tunable via OL_PREWARM_HOME_PAGES.
+OL_PREWARM_HOME_PAGES: int = max(1, int(os.environ.get("OL_PREWARM_HOME_PAGES", "3")))
 
 _nomad_addr = os.environ.get("NOMAD_ADDR_memcached", "")
 _nomad_host, _, _nomad_port = _nomad_addr.partition(":")
@@ -63,6 +71,8 @@ __all__ = [
     "OL_BASE_URL",
     "OL_USER_AGENT",
     "OL_REQUEST_TIMEOUT",
+    "OL_MAX_CONCURRENT_REQUESTS",
+    "OL_PREWARM_HOME_PAGES",
     "FEATURED_SUBJECTS",
     "SENTRY_DSN",
     "ENVIRONMENT",

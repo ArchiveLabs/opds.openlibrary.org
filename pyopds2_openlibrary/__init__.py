@@ -2,6 +2,7 @@ import re as _re
 import time as _time
 import typing
 import unicodedata as _unicodedata
+from datetime import datetime as _datetime
 from html.parser import HTMLParser as _HTMLParser
 from typing import List, Optional, TypedDict, Union, cast
 from typing_extensions import Literal
@@ -41,6 +42,17 @@ def _patch_by_alias(cls):
 
 _patch_by_alias(Publication)
 _patch_by_alias(Catalog)
+
+
+# OPDS 2.0 (opds.io §2.3) selects images responsively rather than via link
+# relations. We still set the legacy opds-spec.org rels on the large image and
+# thumbnail for OPDS 1.x clients; the small variant carries no rel. Dimensions
+# are intentionally omitted — Open Library exposes no per-size dimension API,
+# and clients read intrinsic dimensions when loading the image.
+_COVER_SIZE_REL: dict[str, str] = {
+    "L": "http://opds-spec.org/image",
+    "M": "http://opds-spec.org/image/thumbnail",
+}
 
 
 class Subject(BaseModel):
@@ -165,6 +177,10 @@ class BookSharedDoc(BaseModel):
     # Subjects are work-level display names; editions carry none.
     subject: Optional[list[str]] = None
     isbn: Optional[list[str]] = None
+    publisher: Optional[list[str]] = None
+    series_name: Optional[list[str]] = None
+    series_key: Optional[list[str]] = None
+    series_position: Optional[list[str]] = None
 
 
 class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
@@ -203,6 +219,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     )
     number_of_pages_median: Optional[int] = None
     id_librivox: Optional[list[str]] = None
+    first_publish_year: Optional[int] = None
 
     @property
     def type(self) -> str:
@@ -280,15 +297,36 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
         return links
 
-    def images(self) -> Optional[List[Link]]:
+    def _displayed_cover_id(self) -> Optional[int]:
+        """The single cover shown for this publication.
+
+        Prefer the first edition's cover, falling back to the work-level
+        cover. Mirrors how metadata()/links() pick editions.docs[0].
+        """
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
-        cover_id = (edition.cover_i if edition and edition.cover_i else None) or self.cover_i
-        if cover_id:
-            return [
-                Link(href=f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg", type="image/jpeg", rel="cover"),
-                Link(href=f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg", type="image/jpeg", rel="cover"),
-            ]
-        return None
+        return (edition.cover_i if edition and edition.cover_i else None) or self.cover_i
+
+    def images(self) -> Optional[List[Link]]:
+        # One cover per publication, offered in three responsive sizes
+        # (large / medium / small) per OPDS 2.0's images collection.
+        cover_id = self._displayed_cover_id()
+
+        if not cover_id:
+            return None
+
+        links = []
+        for size in ("L", "M", "S"):
+            link_kwargs: dict = {}
+            rel = _COVER_SIZE_REL.get(size)
+            if rel:
+                link_kwargs["rel"] = rel
+            links.append(Link(
+                href=f"https://covers.openlibrary.org/b/id/{cover_id}-{size}.jpg",
+                type="image/jpeg",
+                **link_kwargs,
+            ))
+
+        return links
 
     def metadata(self) -> Metadata:
         """Return this record as OPDS Metadata."""
@@ -362,6 +400,36 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                     isbn13 = code
                     break
 
+        ol_publisher = None
+        if self.publisher:
+            opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
+            pub_name = self.publisher[0]
+            pub_href = f"{opds_base}/search?" + urlencode({"query": f'publisher:"{pub_name}"', "title": pub_name})
+            ol_publisher = [Contributor(name=pub_name, links=[Link(href=pub_href, type="application/opds+json")])]
+
+        ol_published = None
+        if self.first_publish_year:
+            ol_published = _datetime(self.first_publish_year, 1, 1)
+
+        belongs_to = None
+        if self.series_name:
+            opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
+            series_entries = []
+            keys = self.series_key or []
+            positions = self.series_position or []
+            for i, name in enumerate(self.series_name):
+                entry: dict = {"name": name}
+                if i < len(positions):
+                    try:
+                        entry["position"] = float(positions[i])
+                    except (ValueError, TypeError):
+                        pass
+                if i < len(keys):
+                    key = keys[i]
+                    entry["links"] = [{"href": f"{opds_base}/series/{key}", "type": "application/opds+json"}]
+                series_entries.append(entry)
+            belongs_to = {"series": series_entries}
+
         return Metadata(
             type=self.type,
             title=book.title or self.title or "Untitled",
@@ -374,6 +442,9 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             aggregateRating=aggregate_rating,
             subject=subjects,
             identifier=f"urn:isbn:{isbn13}" if isbn13 else None,
+            publisher=ol_publisher,
+            published=ol_published,
+            **({} if belongs_to is None else {"belongsTo": belongs_to}),
         )
 
 class OpenLibraryLanguageStub(TypedDict):
@@ -1835,6 +1906,177 @@ class OpenLibraryDataProvider(DataProvider):
         return f"{base}/?{urlencode(params)}" if params else f"{base}/"
 
     @classmethod
+    def _collect_home_groups(
+        cls, mode: str, language: Optional[str],
+        media_type: Optional[str], access: Optional[str],
+        language_counts: Optional[dict[str, int]], limit: int,
+    ) -> list[Catalog]:
+        """Fetch every configured home group in parallel; return the non-empty
+        ones in config order.
+
+        Shared by ``build_home_feed`` (single page) and ``build_home_pages``
+        (every page from one fetch), so the full group fan-out happens once
+        regardless of how many pages are produced.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        all_groups = cls._home_groups_config(mode, language, language_counts=language_counts)
+        if not all_groups:
+            return []
+
+        # Non-English: drop the cover requirement and widen the Solr pool so
+        # carousels still fill (international books often lack ``cover_i``).
+        is_english_or_all = language in (None, "en")
+        default_limit = 25 if is_english_or_all else 50
+        group_limit = limit if limit > 0 else default_limit
+        group_require_cover = is_english_or_all
+
+        def fetch_one(title: str, query: str, sort: str) -> Optional[Catalog]:
+            try:
+                resp = cls.search(
+                    query=query, sort=sort, limit=group_limit,
+                    language=language, facets={"mode": mode}, title=title,
+                    media_type=media_type, access=access,
+                    require_cover=group_require_cover,
+                )
+                desc = _GROUP_DESCRIPTIONS.get(title)
+                return Catalog.create(metadata=Metadata(title=title, description=desc), response=resp)
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=len(all_groups)) as pool:
+            futures = {
+                pool.submit(fetch_one, t, q, s): i
+                for i, (t, q, s) in enumerate(all_groups)
+            }
+            results: list[Optional[Catalog]] = [None] * len(all_groups)
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+
+        return [g for g in results if g is not None and g.publications]
+
+    @classmethod
+    def featured_subject_feeds(
+        cls,
+        subjects: Optional[list[dict[str, str]]] = None,
+        language: Optional[str] = None,
+        media_type: Optional[str] = None,
+    ) -> list[tuple[str, str, str]]:
+        """Return ``(title, query, sort)`` for each featured subject feed.
+
+        Single source of truth for the home nav links, the search cache key, and
+        the warmer — so all three agree on the exact query strings. Standard
+        Ebooks is English-only and dropped for other languages.
+        """
+        subjects = subjects if subjects is not None else cls.FEATURED_SUBJECTS
+        feeds: list[tuple[str, str, str]] = []
+        for subject in subjects:
+            title = subject["presentable_name"]
+            if title == "Standard Ebooks" and language not in (None, "en"):
+                continue
+            query = subject.get("query") or (
+                f'subject_key:{subject["key"].split("/")[-1]}'
+                f' -subject:"content_warning:cover"'
+                f' ebook_access:[borrowable TO *]'
+            )
+            feeds.append((title, query, "trending"))
+        return feeds
+
+    @classmethod
+    def _render_home_page(
+        cls, non_empty: list[Catalog], base: str, mode: str, language: Optional[str],
+        page: int, media_type: Optional[str], access: Optional[str],
+        language_counts: Optional[dict[str, int]], subjects: list[dict[str, str]],
+    ) -> dict:
+        """Assemble one home page (slice + navigation + links + facets) from an
+        already-fetched, non-empty group list. Pure assembly — no OL calls."""
+        media = cls.OPDS_MEDIA_TYPE
+        search_url = cls.SEARCH_URL
+        per_page = cls.GROUPS_PER_PAGE
+
+        # Paginate the surviving (non-empty) groups.
+        start = (page - 1) * per_page
+        loaded_groups = non_empty[start : start + per_page]
+        has_next = start + per_page < len(non_empty)
+
+        # Navigation — only on page 1 when groups loaded. The feed list comes
+        # from ``featured_subject_feeds`` so nav, the cache key, and the warmer
+        # all agree on the exact (title, query, sort) (single source of truth).
+        navigation: list[Navigation] = []
+        if page == 1 and loaded_groups:
+            for title, query, sort in cls.featured_subject_feeds(subjects, language, media_type):
+                nav_params: dict[str, str] = {
+                    "sort": sort,
+                    "title": title,
+                    "query": query,
+                }
+                if language:
+                    nav_params["language"] = language
+                if media_type:
+                    nav_params["media_type"] = media_type
+                navigation.append(Navigation(
+                    type=media,
+                    title=title,
+                    href=f"{search_url}?{urlencode(nav_params)}",
+                ))
+
+        # Links
+        links = [
+            Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type, access), type=media),
+            Link(rel="start", href=f"{base}/", type=media),
+            Link(rel="search", href=f"{base}/search{{?query}}", type=media, templated=True),
+            cls.bookshelf_link(),
+            cls.profile_link(),
+        ]
+        if has_next:
+            links.append(Link(rel="next", href=cls._home_page_href(base, mode, language, page + 1, media_type, access), type=media))
+        if page > 1:
+            links.append(Link(rel="previous", href=cls._home_page_href(base, mode, language, page - 1, media_type, access), type=media))
+
+        catalog = Catalog(
+            metadata=Metadata(title="Open Library"),
+            publications=[],
+            navigation=navigation,
+            groups=loaded_groups,
+            facets=cls.build_home_facets(base, mode, language, media_type, access=access, language_counts=language_counts),
+            links=links,
+        )
+        return catalog.model_dump()
+
+    @classmethod
+    def build_home_pages(
+        cls,
+        base: str,
+        mode: str = "everything",
+        language: Optional[str] = None,
+        *,
+        media_type: Optional[str] = None,
+        access: Optional[str] = None,
+        language_counts: Optional[dict[str, int]] = None,
+        limit: int = 0,
+        featured_subjects: Optional[list[dict[str, str]]] = None,
+        pages: Optional[int] = None,
+    ) -> list[dict]:
+        """Build every home page from a single group fan-out.
+
+        Returns a list of page dicts (index 0 == page 1). Lets a caller warm
+        pages 1..N with one OL fetch instead of one fan-out per page. ``pages``
+        caps how many are returned; ``None`` returns all that have content.
+        """
+        subjects = featured_subjects if featured_subjects is not None else cls.FEATURED_SUBJECTS
+        non_empty = cls._collect_home_groups(mode, language, media_type, access, language_counts, limit)
+        per_page = cls.GROUPS_PER_PAGE
+        total_pages = max(1, (len(non_empty) + per_page - 1) // per_page)
+        if pages is not None:
+            total_pages = min(total_pages, max(1, pages))
+        return [
+            cls._render_home_page(
+                non_empty, base, mode, language, p, media_type, access, language_counts, subjects,
+            )
+            for p in range(1, total_pages + 1)
+        ]
+
+    @classmethod
     def build_home_feed(
         cls,
         base: str,
@@ -1868,120 +2110,18 @@ class OpenLibraryDataProvider(DataProvider):
         Returns:
             A dict ready to be serialised as JSON (via ``Catalog.model_dump``).
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
+        # Fetch every configured group once, then paginate only the non-empty
+        # ones. Pagination must come *after* the empty-group filter: slicing
+        # first and dropping empties afterwards let a page whose slice happened
+        # to contain empty carousels render with fewer than GROUPS_PER_PAGE
+        # groups — minority-language homepages routinely collapsed to just
+        # "Trending Books" this way. The caller-provided ``limit`` (> 0)
+        # overrides the per-carousel language default.
         subjects = featured_subjects if featured_subjects is not None else cls.FEATURED_SUBJECTS
-        media = cls.OPDS_MEDIA_TYPE
-        search_url = cls.SEARCH_URL
-        all_groups = cls._home_groups_config(mode, language, language_counts=language_counts)
-
-        # Fetch every configured group, then paginate only the non-empty ones.
-        # Pagination must come *after* the empty-group filter: slicing first and
-        # dropping empties afterwards (the old order) let a page whose slice
-        # happened to contain empty carousels render with fewer than
-        # GROUPS_PER_PAGE groups — minority-language homepages routinely
-        # collapsed to just "Trending Books" this way.
-        per_page = cls.GROUPS_PER_PAGE
-
-        # Fetch groups in parallel.
-        # Non-English: drop the cover requirement and widen the Solr pool so
-        # carousels still fill. International books often lack ``cover_i``
-        # metadata, and a smaller intersection with ``language:<MARC>`` would
-        # otherwise empty most subject groups. Empty carousels are dropped
-        # entirely by the publications-check below, so a placeholder cover
-        # is a better UX than a missing carousel.
-        is_english_or_all = language in (None, "en")
-        # Caller-provided limit (> 0) overrides the language-default cap; lets
-        # a client tune per-carousel size via ``?limit=N`` on the home route.
-        default_limit = 25 if is_english_or_all else 50
-        group_limit = limit if limit > 0 else default_limit
-        group_require_cover = is_english_or_all
-
-        def fetch_one(title: str, query: str, sort: str) -> Optional[Catalog]:
-            try:
-                resp = cls.search(
-                    query=query, sort=sort, limit=group_limit,
-                    language=language, facets={"mode": mode}, title=title,
-                    media_type=media_type, access=access,
-                    require_cover=group_require_cover,
-                )
-                desc = _GROUP_DESCRIPTIONS.get(title)
-                return Catalog.create(metadata=Metadata(title=title, description=desc), response=resp)
-            except Exception:
-                return None
-
-        non_empty: list[Catalog] = []
-        if all_groups:
-            with ThreadPoolExecutor(max_workers=len(all_groups)) as pool:
-                futures = {
-                    pool.submit(fetch_one, t, q, s): i
-                    for i, (t, q, s) in enumerate(all_groups)
-                }
-                results: list[Optional[Catalog]] = [None] * len(all_groups)
-                for future in as_completed(futures):
-                    results[futures[future]] = future.result()
-
-            non_empty = [
-                g for g in results
-                if g is not None and g.publications
-            ]
-
-        # Paginate the surviving (non-empty) groups.
-        start = (page - 1) * per_page
-        loaded_groups = non_empty[start : start + per_page]
-        has_next = start + per_page < len(non_empty)
-
-        # Navigation — only on page 1 when groups loaded
-        navigation: list[Navigation] = []
-        if page == 1 and loaded_groups:
-            # Standard Ebooks is English-only; hide its nav link for other languages.
-            visible_subjects = [
-                s for s in subjects
-                if s.get("presentable_name") != "Standard Ebooks" or language in (None, "en")
-            ]
-            for subject in visible_subjects:
-                q = subject.get("query") or (
-                    f'subject_key:{subject["key"].split("/")[-1]}'
-                    f' -subject:"content_warning:cover"'
-                    f' ebook_access:[borrowable TO *]'
-                )
-                nav_params: dict[str, str] = {
-                    "sort": "trending",
-                    "title": subject["presentable_name"],
-                    "query": q,
-                }
-                if language:
-                    nav_params["language"] = language
-                if media_type:
-                    nav_params["media_type"] = media_type
-                navigation.append(Navigation(
-                    type=media,
-                    title=subject["presentable_name"],
-                    href=f"{search_url}?{urlencode(nav_params)}",
-                ))
-
-        # Links
-        links = [
-            Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type, access), type=media),
-            Link(rel="start", href=f"{base}/", type=media),
-            Link(rel="search", href=f"{base}/search{{?query}}", type=media, templated=True),
-            cls.bookshelf_link(),
-            cls.profile_link(),
-        ]
-        if has_next:
-            links.append(Link(rel="next", href=cls._home_page_href(base, mode, language, page + 1, media_type, access), type=media))
-        if page > 1:
-            links.append(Link(rel="previous", href=cls._home_page_href(base, mode, language, page - 1, media_type, access), type=media))
-
-        catalog = Catalog(
-            metadata=Metadata(title="Open Library"),
-            publications=[],
-            navigation=navigation,
-            groups=loaded_groups,
-            facets=cls.build_home_facets(base, mode, language, media_type, access=access, language_counts=language_counts),
-            links=links,
+        non_empty = cls._collect_home_groups(mode, language, media_type, access, language_counts, limit)
+        return cls._render_home_page(
+            non_empty, base, mode, language, page, media_type, access, language_counts, subjects,
         )
-        return catalog.model_dump()
 
     @typing.override
     @staticmethod
@@ -2030,7 +2170,8 @@ class OpenLibraryDataProvider(DataProvider):
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
             "number_of_pages_median", "id_librivox", "ratings_average", "ratings_count",
-            "subject", "isbn",
+            "subject", "isbn", "publisher", "first_publish_year",
+            "series_name", "series_key", "series_position",
         ]
 
         internal_query = query

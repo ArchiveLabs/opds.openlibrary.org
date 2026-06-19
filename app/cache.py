@@ -6,6 +6,7 @@ import json
 import random
 import time
 import zlib
+from contextvars import ContextVar
 from typing import Any, Callable, Coroutine, Protocol, runtime_checkable
 
 from pymemcache.client.base import PooledClient
@@ -15,13 +16,36 @@ from app.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Records whether the most recent cache resolve served a stored value ("HIT") or
+# ran the fetch/build ("MISS"). Routes read it after resolving the *main*
+# resource to set the X-Cache response header. Per-request via contextvar.
+_cache_status: ContextVar[str] = ContextVar("opds_cache_status", default="")
+
+
+def last_cache_status() -> str:
+    """Outcome of the most recent cache resolve in this request: HIT or MISS."""
+    return _cache_status.get()
+
 # ---------------------------------------------------------------------------
 # TTL constants (module-level — pure data)
 # ---------------------------------------------------------------------------
 
-TTL_HOME_DEFAULT_SECONDS    = 2 * 60
+TTL_HOME_DEFAULT_SECONDS    = 10 * 60
 TTL_HOME_NONDEFAULT_SECONDS = 15 * 60
+# Trending Books carousel — kept on its own SHORT-TTL key and injected into the
+# home feed per request. Trending titles get borrowed fast, so a 60s SWR keeps
+# the row biased toward currently-available books even while the rest of the
+# (slow-changing) home feed stays long-cached.
 TTL_TRENDING_SECONDS        = 1 * 60
+# Featured subject feeds (Art, Sci-Fi, …) — the home nav links. Bounded set,
+# warmed after home; carousels change slowly so a longer TTL is fine.
+TTL_SUBJECT_SECONDS         = 30 * 60
+TTL_SUBJECT_STALE_SECONDS   = 60 * 60
+# Generic /search responses (free-text queries + facet/availability/media/access
+# filters). Cached lazily on first hit so repeats + facet navigation serve from
+# cache; memcached LRU + TTL bound the (unbounded) key space.
+TTL_SEARCH_SECONDS          = 15 * 60
+TTL_SEARCH_STALE_SECONDS    = 30 * 60
 TTL_BOOK_SECONDS            = 6 * 60 * 60
 TTL_AUTHOR_BIO_SECONDS      = 24 * 60 * 60
 TTL_AUTHOR_CATALOG_SECONDS  = 1 * 60 * 60
@@ -39,12 +63,23 @@ TTL_HOME_DEFAULT_STALE_SECONDS = 30 * 60
 TTL_TRENDING_STALE_SECONDS     = 10 * 60
 
 LANG_OPTIONS_KEY = "opds:lang_options"
+# Per-language ebook counts come from the global languages.json (independent of
+# query/mode/media_type/access), so they share one stable key across every
+# home and search request — fetched once, reused everywhere.
+LANG_COUNTS_KEY = "opds:lang_counts"
 
 _COMPRESSION_THRESHOLD = 10240  # 10 KB
 
 # Backoff window after a memcached op fails. Prevents per-request reconnect storms
 # when memcached is down. New connection attempts gated by monotonic clock.
 _MEMCACHE_RECONNECT_BACKOFF_SECONDS = 5.0
+
+# When another process holds the build lock, wait this long for its result
+# before rebuilding ourselves. Must comfortably exceed a typical build (home
+# builds take tens of seconds) and roughly match the distributed-lock lifetime,
+# or workers stampede and each rebuild the same key — multiplying OL load.
+_STAMPEDE_MAX_WAIT_SECONDS = 30.0
+_STAMPEDE_POLL_INTERVAL_SECONDS = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +127,8 @@ class CacheBackend(Protocol):
         is_valid: Callable[[dict], bool] | None = None,
     ) -> dict: ...
 
+    def acquire_or_renew_lease(self, name: str, ttl: int, owner: str) -> bool: ...
+
 
 # ---------------------------------------------------------------------------
 # NullCacheBackend — no-op, used when CACHE_ENABLED=false or in tests
@@ -113,6 +150,7 @@ class NullCacheBackend:
         fetch: Callable[[], Coroutine[Any, Any, dict]],
         is_valid: Callable[[dict], bool] | None = None,
     ) -> dict:
+        _cache_status.set("MISS")
         return await fetch()
 
     async def cached_swr(
@@ -123,7 +161,12 @@ class NullCacheBackend:
         fetch: Callable[[], Coroutine[Any, Any, dict]],
         is_valid: Callable[[dict], bool] | None = None,
     ) -> dict:
+        _cache_status.set("MISS")
         return await fetch()
+
+    def acquire_or_renew_lease(self, name: str, ttl: int, owner: str) -> bool:
+        # Single-process / no cache → always the leader.
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +186,10 @@ class MemcachedBackend:
         self._reconnect_after: float = 0.0
         self._locks: dict[str, asyncio.Lock] = {}
         self._refreshing: set[str] = set()
+        # Strong refs to in-flight background refresh tasks. asyncio only keeps
+        # weak refs, so an un-held task may be GC'd mid-run, silently killing the
+        # recompute. Hold each until it completes (cleared via done-callback).
+        self._refresh_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -186,7 +233,7 @@ class MemcachedBackend:
             )
 
     def _serialize(self, value: dict) -> bytes:
-        raw = json.dumps(value, separators=(",", ":")).encode()
+        raw = json.dumps(value, separators=(",", ":"), default=str).encode()
         if len(raw) > _COMPRESSION_THRESHOLD:
             return b"z:" + zlib.compress(raw, level=6)
         return b"j:" + raw
@@ -221,11 +268,42 @@ class MemcachedBackend:
         except Exception as exc:
             self._invalidate_client(exc)  # TTL will clean up the lock entry
 
+    def acquire_or_renew_lease(self, name: str, ttl: int, owner: str) -> bool:
+        """Sticky single-leader lease via Memcached. Returns True if ``owner``
+        holds the lease after this call.
+
+        - absent  → ``add`` (race-safe; exactly one worker wins)
+        - ours    → ``set`` to renew (keeps leadership across cycles)
+        - other's → not leader
+
+        The lease auto-expires after ``ttl``, so a dead leader is replaced. Used
+        to elect ONE warmer among N workers (others stay idle). No Memcached →
+        True (single-process/dev acts as the leader).
+        """
+        client = self._get_client()
+        if client is None:
+            return True
+        lease_key = f"lease:{name}"
+        owner_b = owner.encode()
+        try:
+            current = client.get(lease_key)
+            if current is None:
+                return bool(client.add(lease_key, owner_b, expire=ttl))
+            if current == owner_b:
+                client.set(lease_key, owner_b, expire=ttl)
+                return True
+            return False
+        except Exception as exc:
+            self._invalidate_client(exc)
+            return True
+
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
     def get(self, key: str) -> dict | None:
+        # HIT/MISS are logged at DEBUG (high-volume, per-request); INFO is reserved
+        # for meaningful events (builds, warm summary, errors).
         client = self._get_client()
         if client is None:
             return None
@@ -236,13 +314,13 @@ class MemcachedBackend:
             self._invalidate_client(exc)
             return None
         if raw is None:
-            logger.info("cache MISS key=%s", key)
+            logger.debug("cache MISS key=%s", key)
             return None
         result = self._deserialize(raw)
         if result is None:
             logger.error("cache decode error key=%s", key)
             return None
-        logger.info("cache HIT key=%s", key)
+        logger.debug("cache HIT key=%s", key)
         return result
 
     def set(self, key: str, value: dict, ttl: int) -> None:
@@ -287,9 +365,11 @@ class MemcachedBackend:
         def _valid(v: dict) -> bool:
             return is_valid is None or is_valid(v)
 
+        _cache_status.set("MISS")
         try:
             result = self.get(key)
             if result is not None and _valid(result):
+                _cache_status.set("HIT")
                 return result
             if result is not None:
                 logger.info("cache invalid entry, discarding key=%s", key)
@@ -298,20 +378,26 @@ class MemcachedBackend:
             async with self._locks.setdefault(key, asyncio.Lock()):
                 result = self.get(key)
                 if result is not None and _valid(result):
+                    _cache_status.set("HIT")
                     return result
                 if result is not None:
                     self._delete(key)
 
                 got_distributed_lock = self._acquire_distributed_lock(key)
                 if not got_distributed_lock:
-                    # Another worker holds the lock — poll until it fills the cache or times out.
-                    # 15 × 200ms = 3s max wait, covers typical OL API response times.
-                    for _ in range(15):
-                        await asyncio.sleep(0.2)
+                    # Another worker holds the lock — wait for its result rather
+                    # than refetching. Poll up to the lock's lifetime (some OL
+                    # calls take many seconds); a short poll would expire mid-
+                    # fetch and make every worker refetch the same key.
+                    polls = int(_STAMPEDE_MAX_WAIT_SECONDS / _STAMPEDE_POLL_INTERVAL_SECONDS)
+                    for _ in range(polls):
+                        await asyncio.sleep(_STAMPEDE_POLL_INTERVAL_SECONDS)
                         result = self.get(key)
                         if result is not None and _valid(result):
+                            logger.info("cache served peer fetch key=%s", key)
+                            _cache_status.set("HIT")
                             return result
-                    # Lock holder took >3s or crashed — fall through and fetch.
+                    # Lock holder crashed or never produced — fall through and fetch.
 
                 try:
                     result = await fetch()
@@ -319,13 +405,18 @@ class MemcachedBackend:
                         self.set(key, result, ttl)
                     else:
                         logger.info("cache skip write (invalid result) key=%s", key)
+                    # Set after fetch so a nested cached() call inside fetch can't
+                    # leave a stale HIT marker for this (built) resource.
+                    _cache_status.set("MISS")
                     return result
                 finally:
                     if got_distributed_lock:
                         self._release_distributed_lock(key)
         except Exception as exc:
             logger.warning("cache layer failed key=%s: %s — fetching uncached", key, exc)
-            return await fetch()
+            result = await fetch()
+            _cache_status.set("MISS")
+            return result
 
     # ------------------------------------------------------------------
     # Stale-while-revalidate
@@ -377,17 +468,21 @@ class MemcachedBackend:
         def _valid(v: dict) -> bool:
             return is_valid is None or is_valid(v)
 
+        _cache_status.set("MISS")
         try:
             wrapped = self.get(key)
             if isinstance(wrapped, dict) and "v" in wrapped:
                 if _valid(wrapped["v"]):
+                    _cache_status.set("HIT")
                     if time.time() < wrapped.get("exp", 0):
                         return wrapped["v"]
                     if key not in self._refreshing:
                         self._refreshing.add(key)
-                        asyncio.create_task(
+                        task = asyncio.create_task(
                             self._refresh_in_background(key, fresh_ttl, stale_ttl, fetch, is_valid)
                         )
+                        self._refresh_tasks.add(task)
+                        task.add_done_callback(self._refresh_tasks.discard)
                     return wrapped["v"]
                 # Cached value is invalid (e.g. previously-poisoned blank entry) — evict and refetch.
                 logger.info("cache swr invalid entry, discarding key=%s", key)
@@ -396,16 +491,25 @@ class MemcachedBackend:
             async with self._locks.setdefault(key, asyncio.Lock()):
                 wrapped = self.get(key)
                 if isinstance(wrapped, dict) and "v" in wrapped and _valid(wrapped["v"]):
+                    _cache_status.set("HIT")
                     return wrapped["v"]
                 if isinstance(wrapped, dict) and "v" in wrapped:
                     self._delete(key)
 
                 got_lock = self._acquire_distributed_lock(key)
                 if not got_lock:
-                    for _ in range(15):
-                        await asyncio.sleep(0.2)
+                    # Another process is building this key. Wait for its result
+                    # rather than rebuilding — builds can take tens of seconds,
+                    # so poll up to the lock's lifetime before giving up (a short
+                    # poll would expire mid-build and cause every worker to
+                    # redundantly rebuild). Quiet gets keep the log clean.
+                    polls = int(_STAMPEDE_MAX_WAIT_SECONDS / _STAMPEDE_POLL_INTERVAL_SECONDS)
+                    for _ in range(polls):
+                        await asyncio.sleep(_STAMPEDE_POLL_INTERVAL_SECONDS)
                         wrapped = self.get(key)
                         if isinstance(wrapped, dict) and "v" in wrapped and _valid(wrapped["v"]):
+                            logger.info("cache swr served peer build key=%s", key)
+                            _cache_status.set("HIT")
                             return wrapped["v"]
 
                 try:
@@ -414,13 +518,18 @@ class MemcachedBackend:
                         self._set_swr(key, result, fresh_ttl, stale_ttl)
                     else:
                         logger.info("cache swr skip write (invalid result) key=%s", key)
+                    # Set after fetch so a nested cached() call inside fetch can't
+                    # leave a stale HIT marker for this (built) resource.
+                    _cache_status.set("MISS")
                     return result
                 finally:
                     if got_lock:
                         self._release_distributed_lock(key)
         except Exception as exc:
             logger.warning("cache swr failed key=%s: %s — fetching uncached", key, exc)
-            return await fetch()
+            result = await fetch()
+            _cache_status.set("MISS")
+            return result
 
 
 # ---------------------------------------------------------------------------

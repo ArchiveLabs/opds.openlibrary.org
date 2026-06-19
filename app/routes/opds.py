@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from typing import Optional
 import asyncio
+import hashlib
 import inspect
+import json
+from functools import lru_cache
 
 import httpx
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Path, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import Response
 
 from pyopds2 import Catalog, Link, Metadata
 from pyopds2_openlibrary import OpenLibraryDataProvider, fetch_author_bio
@@ -16,6 +20,7 @@ from pyopds2_openlibrary import OpenLibraryDataProvider, fetch_author_bio
 import pyopds2_openlibrary as _ol_module
 from app.cache import (
     CacheBackend,
+    LANG_COUNTS_KEY,
     LANG_OPTIONS_KEY,
     TTL_AUTHOR_BIO_SECONDS,
     TTL_AUTHOR_CATALOG_SECONDS,
@@ -25,9 +30,14 @@ from app.cache import (
     TTL_HOME_NONDEFAULT_SECONDS,
     TTL_LANG_COUNTS_SECONDS,
     TTL_LANG_OPTIONS_SECONDS,
+    TTL_SEARCH_SECONDS,
+    TTL_SEARCH_STALE_SECONDS,
+    TTL_SUBJECT_SECONDS,
+    TTL_SUBJECT_STALE_SECONDS,
     TTL_TRENDING_SECONDS,
     TTL_TRENDING_STALE_SECONDS,
     get_cache,
+    last_cache_status,
     make_key,
 )
 from app.config import (
@@ -45,6 +55,11 @@ from app.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+try:
+    from pyopds2_openlibrary import _GROUP_DESCRIPTIONS as _OL_GROUP_DESCRIPTIONS
+except ImportError:
+    _OL_GROUP_DESCRIPTIONS: dict = {}
 
 
 def _safe_total(value: object) -> int:
@@ -82,12 +97,41 @@ def get_provider(base: str) -> OpenLibraryDataProvider:
     return OpenLibraryDataProvider()
 
 
-def opds_response(data: dict) -> JSONResponse:
-    return JSONResponse(content=data, media_type=OPDS_MEDIA_TYPE)
+def _conditional_response(
+    request: Request, data: dict, media_type: str, max_age: int, cache_status: str,
+) -> Response:
+    """Serve an OPDS document with proper HTTP cache semantics.
+
+    Status codes are correct for both paths: a served body is ``200`` whether it
+    came from our cache or a live build (HTTP doesn't distinguish those — the
+    body is identical), and a client that already holds the current version
+    (``If-None-Match`` matches our ``ETag``) gets ``304 Not Modified`` with no
+    body. ``Cache-Control: max-age`` lets clients/CDNs revalidate instead of
+    blindly refetching. ``X-Cache: HIT|MISS`` exposes whether *we* served the
+    main resource from our cache or built it live (logged too).
+    """
+    body = json.dumps(jsonable_encoder(data), separators=(",", ":")).encode()
+    etag = '"' + hashlib.sha1(body).hexdigest() + '"'
+    headers = {
+        "Cache-Control": f"public, max-age={max_age}",
+        "ETag": etag,
+        "X-Cache": cache_status or "MISS",
+    }
+    status = 304 if request.headers.get("if-none-match") == etag else 200
+    logger.info(
+        "served %s cache=%s status=%s", request.url.path, headers["X-Cache"], status,
+    )
+    if status == 304:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type=media_type, headers=headers)
 
 
-def opds_pub_response(data: dict) -> JSONResponse:
-    return JSONResponse(content=data, media_type=OPDS_PUB_MEDIA_TYPE)
+def opds_response(request: Request, data: dict, *, max_age: int, cache_status: str = "") -> Response:
+    return _conditional_response(request, data, OPDS_MEDIA_TYPE, max_age, cache_status)
+
+
+def opds_pub_response(request: Request, data: dict, *, max_age: int, cache_status: str = "") -> Response:
+    return _conditional_response(request, data, OPDS_PUB_MEDIA_TYPE, max_age, cache_status)
 
 
 def _search(provider: OpenLibraryDataProvider, **kwargs):
@@ -149,10 +193,189 @@ def _safe_fetch_language_counts(**kwargs) -> dict:
         return {}
 
 
-try:
-    from pyopds2_openlibrary import _GROUP_DESCRIPTIONS as _OL_GROUP_DESCRIPTIONS
-except ImportError:
-    _OL_GROUP_DESCRIPTIONS: dict = {}
+
+# ---------------------------------------------------------------------------
+# Homepage build helpers — shared by the route and the startup/keep-warm warmer
+# (app/main.py) so both populate identical cache keys with identical logic.
+# ---------------------------------------------------------------------------
+
+def _home_cache_key(
+    base: str, mode: str, language: Optional[str], page: int,
+    media_type: Optional[str], access: Optional[str], limit: int,
+) -> str:
+    """Cache key for one home page variant (long-lived: carousels change slowly).
+    The fast-moving Trending carousel has its own short-TTL key (see
+    ``_trending_cache_key``) and is injected per request."""
+    return make_key("home", {
+        "base": base, "mode": mode, "language": language,
+        "page": page, "media_type": media_type, "access": access,
+        "limit": limit,
+    })
+
+
+def _trending_cache_key(
+    mode: str, language: Optional[str],
+    media_type: Optional[str], access: Optional[str], limit: int,
+) -> str:
+    """Short-TTL key for the Trending carousel, shared across pages/base variants."""
+    return make_key("home_trending", {
+        "mode": mode, "language": language,
+        "media_type": media_type, "access": access, "limit": limit,
+    })
+
+
+def _home_is_valid(d: dict) -> bool:
+    # A homepage with no groups means every upstream group fetch failed; never
+    # cache it (validators run on both reads and writes).
+    return bool(d.get("groups"))
+
+
+def _trending_is_valid(d: dict) -> bool:
+    return bool(d.get("publications"))
+
+
+async def _fetch_lang_counts() -> dict:
+    # Per-language ebook counts are global (the provider ignores query/mode/etc),
+    # so this is fetched once under LANG_COUNTS_KEY and reused everywhere.
+    counts = await asyncio.to_thread(_safe_fetch_language_counts)
+    return {"counts": counts or {}}
+
+
+def _refresh_lang_options_cache() -> None:
+    """Mirror the in-process language map into Memcached after a home build."""
+    if _ol_module._languages_map_cache:
+        get_cache().set(LANG_OPTIONS_KEY, {
+            "map": _ol_module._languages_map_cache,
+            "names": _ol_module._languages_names_cache,
+        }, TTL_LANG_OPTIONS_SECONDS)
+
+
+async def _fetch_home_full(
+    provider, base: str, mode: str, language: Optional[str], page: int,
+    media_type: Optional[str], access: Optional[str], limit: int,
+    language_counts: Optional[dict],
+) -> dict:
+    data = await asyncio.to_thread(
+        _call_provider_compat,
+        OpenLibraryDataProvider.build_home_feed,
+        base=base,
+        mode=mode,
+        language=language,
+        page=page,
+        media_type=media_type,
+        access=access,
+        language_counts=language_counts,
+        limit=limit,
+    )
+    _refresh_lang_options_cache()
+    return data
+
+
+async def _fetch_trending(
+    provider, mode: str, language: Optional[str], limit: int,
+    media_type: Optional[str], access: Optional[str],
+) -> dict:
+    """Fetch the Trending Books carousel on its own for short-TTL refresh.
+
+    Kept separate from the long-cached home feed so the row reflects *currently
+    available* books under load (trending titles get borrowed fast). The query
+    already constrains to borrowable copies. Returns ``{}`` when the variant has
+    no trending group.
+    """
+    groups_config = OpenLibraryDataProvider._home_groups_config(mode, language)
+    trending = next((g for g in groups_config if g[0] == "Trending Books"), None)
+    if not trending:
+        return {}
+    t_title, t_query, t_sort = trending
+    trending_limit = limit if limit > 0 else 25
+    resp = await asyncio.to_thread(
+        _search, provider, query=t_query, sort=t_sort, limit=trending_limit,
+        language=language, facets={"mode": mode}, title=t_title,
+        require_cover=False, media_type=media_type, access=access,
+    )
+    group_catalog = Catalog.create(
+        metadata=Metadata(title=t_title, description=_OL_GROUP_DESCRIPTIONS.get(t_title)),
+        response=resp,
+    )
+    return group_catalog.model_dump()
+
+
+# --- Featured subject search caching (bounded set; warmed after home) ---------
+
+def _search_cache_key(
+    query: str, sort: Optional[str], limit: int, page: int, mode: str,
+    language: Optional[str], media_type: Optional[str], access: Optional[str],
+) -> str:
+    return make_key("search", {
+        "query": query, "sort": sort, "limit": limit, "page": page, "mode": mode,
+        "language": language, "media_type": media_type, "access": access,
+    })
+
+
+@lru_cache(maxsize=1)
+def _featured_search_set() -> frozenset[tuple[str, Optional[str]]]:
+    """(query, sort) pairs for the default featured subject feeds — the bounded
+    set whose search responses we cache + warm. Built once from the package's
+    single source of truth so route, key, and warmer agree."""
+    return frozenset(
+        (query, sort)
+        for _title, query, sort in OpenLibraryDataProvider.featured_subject_feeds()
+    )
+
+
+def _is_featured_search(query: str, sort: Optional[str]) -> bool:
+    return (query, sort) in _featured_search_set()
+
+
+async def build_search_page(
+    provider, base: str, *, query: str, limit: int, page: int, sort: Optional[str],
+    mode: str, title: Optional[str], language: Optional[str],
+    media_type: Optional[str], access: Optional[str],
+    language_counts: Optional[dict], self_href: str,
+) -> dict:
+    """Build one /search results page dict. Shared by the search route and the
+    subject warmer so a warmed key matches exactly what the route would serve."""
+
+    def _fetch_facet_counts_safe(q: str) -> dict:
+        try:
+            return _call_provider_compat(
+                OpenLibraryDataProvider.fetch_facet_counts,
+                query=q, media_type=media_type, language=language,
+            )
+        except Exception as exc:
+            logger.warning("facet count fetch failed, omitting counts: %s", exc)
+            return {}
+
+    search_response, availability_counts = await asyncio.gather(
+        asyncio.to_thread(
+            _search, provider, query=query, limit=limit, offset=(page - 1) * limit,
+            sort=sort, facets={"mode": mode}, language=language, title=title,
+            require_cover=False, media_type=media_type, access=access,
+        ),
+        asyncio.to_thread(_fetch_facet_counts_safe, query),
+    )
+
+    safe_total = _safe_total(getattr(search_response, "total", None))
+    if safe_total != getattr(search_response, "total", None):
+        logger.warning("search response returned invalid total=%r; defaulting to 0", getattr(search_response, "total", None))
+    search_response.total = safe_total
+    availability_counts[mode] = safe_total
+
+    catalog = Catalog.create(
+        metadata=Metadata(title=title or "Search Results"),
+        response=search_response,
+        links=[
+            Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
+            *_common_links(base),
+        ],
+        facets=_call_provider_compat(
+            OpenLibraryDataProvider.build_facets,
+            base_url=base, query=query, sort=sort, mode=mode, language=language,
+            title=title, total=safe_total, availability_counts=availability_counts,
+            media_type=media_type, access=access, language_counts=language_counts,
+        ),
+    )
+    return catalog.model_dump()
 
 
 @router.get("/", summary="OPDS 2.0 homepage")
@@ -173,116 +396,39 @@ async def opds_home(
     is_default = mode == "everything" and language is None and page == 1 and media_type is None and access is None
     ttl = TTL_HOME_DEFAULT_SECONDS if is_default else TTL_HOME_NONDEFAULT_SECONDS
 
-    # Each page cached separately — page is included in the key.
-    home_key = make_key("home", {
-        "base": base, "mode": mode, "language": language,
-        "page": page, "media_type": media_type, "access": access,
-        "limit": limit,
-    })
-    # Trending group gets its own short-TTL key shared across pages/base variants.
-    trending_key = make_key("home_trending", {
-        "mode": mode, "language": language,
-        "media_type": media_type, "access": access,
-        "limit": limit,
-    })
-    # Language facet counts: one Solr facet call per (mode, media_type, access).
-    # Shared across home pages so paging the homepage doesn't re-fetch.
-    lang_counts_key = make_key("home_lang_counts", {
-        "mode": mode, "media_type": media_type, "access": access,
-    })
-
-    async def _fetch_lang_counts() -> dict:
-        counts = await asyncio.to_thread(
-            _safe_fetch_language_counts,
-            query="ebook_access:[* TO *]",
-            mode=mode,
-            media_type=media_type,
-            access=access,
-        )
-        return {"counts": counts or {}}
+    home_key = _home_cache_key(
+        base, mode, language, page, media_type, access, limit,
+    )
+    trending_key = _trending_cache_key(mode, language, media_type, access, limit)
 
     lang_counts_payload = await cache.cached(
-        lang_counts_key, TTL_LANG_COUNTS_SECONDS, _fetch_lang_counts,
+        LANG_COUNTS_KEY, TTL_LANG_COUNTS_SECONDS, _fetch_lang_counts,
     )
     language_counts = lang_counts_payload.get("counts") or None
 
-    async def _fetch_full() -> dict:
-        data = await asyncio.to_thread(
-            _call_provider_compat,
-            OpenLibraryDataProvider.build_home_feed,
-            base=base,
-            mode=mode,
-            language=language,
-            page=page,
-            media_type=media_type,
-            access=access,
-            language_counts=language_counts,
-            limit=limit,
-        )
-        # Refresh language options in Memcached while we have fresh in-process data.
-        if _ol_module._languages_map_cache:
-            cache.set(LANG_OPTIONS_KEY, {
-                "map": _ol_module._languages_map_cache,
-                "names": _ol_module._languages_names_cache,
-            }, TTL_LANG_OPTIONS_SECONDS)
-        return data
-
-    async def _fetch_trending() -> dict:
-        """Fetch the Trending Books group independently for short-TTL refresh.
-
-        Always populates trending_key so the overlay has a consistent structure.
-        Uses _search() to get proper httpx error → UpstreamError wrapping.
-        """
-        groups_config = OpenLibraryDataProvider._home_groups_config(mode, language)
-        trending = next((g for g in groups_config if g[0] == "Trending Books"), None)
-        if not trending:
-            return {}
-        t_title, t_query, t_sort = trending
-        # Honor the user-supplied ``limit`` so the SWR-refreshed trending overlay
-        # stays the same shape as the rest of the page's carousels.
-        trending_limit = limit if limit > 0 else 25
-        resp = await asyncio.to_thread(
-            _search,
-            provider,
-            query=t_query,
-            sort=t_sort,
-            limit=trending_limit,
-            language=language,
-            facets={"mode": mode},
-            title=t_title,
-            require_cover=False,
-            media_type=media_type,
-            access=access,
-        )
-        group_catalog = Catalog.create(
-            metadata=Metadata(title=t_title, description=_OL_GROUP_DESCRIPTIONS.get(t_title)),
-            response=resp,
-        )
-        return group_catalog.model_dump()
-
-    # Reject empty payloads — a homepage with no groups means every upstream
-    # group fetch failed (e.g. OL 403/500) and caching it would pin a blank
-    # response for the full TTL. A trending overlay without publications is
-    # equally useless. Validators run on both reads and writes.
-    def _home_is_valid(d: dict) -> bool:
-        return bool(d.get("groups"))
-
-    def _trending_is_valid(d: dict) -> bool:
-        return bool(d.get("publications"))
-
-    # Full page served via stale-while-revalidate for every variant. Cold OL
-    # Solr hits cost 30–40 s; serving the stale copy and refreshing in the
-    # background keeps language/mode/facet switches snappy after the first hit.
+    # Long-lived home feed via SWR (carousels change slowly; pre-warmed in the
+    # background — see app/warmup.py). A cold blocking build rarely faces a real
+    # user; when it does we wait for the full feed rather than serve a blank one.
     data = await cache.cached_swr(
-        home_key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, _fetch_full,
+        home_key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS,
+        lambda: _fetch_home_full(
+            provider, base, mode, language, page, media_type, access, limit, language_counts,
+        ),
         is_valid=_home_is_valid,
     )
+    # Capture the main-resource outcome before the trending overlay resolves
+    # (which would overwrite the per-request cache-status marker).
+    cache_status = last_cache_status()
 
-    # Trending group overlaid via SWR so the 60s refresh never blocks a user.
+    # Trending carousel: kept on a short-TTL SWR key and injected per request, so
+    # the row stays biased toward currently-available books even though the rest
+    # of the feed is long-cached. SWR means near-fresh without an OL call on every
+    # hit; the query itself constrains to borrowable copies.
     groups = data.get("groups", [])
     if any(g.get("metadata", {}).get("title") == "Trending Books" for g in groups):
         fresh_trending = await cache.cached_swr(
-            trending_key, TTL_TRENDING_SECONDS, TTL_TRENDING_STALE_SECONDS, _fetch_trending,
+            trending_key, TTL_TRENDING_SECONDS, TTL_TRENDING_STALE_SECONDS,
+            lambda: _fetch_trending(provider, mode, language, limit, media_type, access),
             is_valid=_trending_is_valid,
         )
         if fresh_trending:
@@ -291,7 +437,10 @@ async def opds_home(
                 for g in groups
             ]}
 
-    return opds_response(data)
+    # Home embeds the fast-moving Trending row, so bound client caching to the
+    # trending TTL: clients revalidate ~minutely (cheap 304 if unchanged) and
+    # pick up fresh trending promptly, rather than caching a stale row for 10min.
+    return opds_response(request, data, max_age=TTL_TRENDING_SECONDS, cache_status=cache_status)
 
 
 @router.get("/search", summary="OPDS 2.0 search")
@@ -313,85 +462,32 @@ async def opds_search(
     provider = get_provider(base)
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
 
-    def _fetch_facet_counts_safe(q: str) -> dict:
-        try:
-            # Via the compat shim so an older provider without the ``language``
-            # parameter still returns counts (unscoped) instead of erroring out.
-            return _call_provider_compat(
-                OpenLibraryDataProvider.fetch_facet_counts,
-                query=q, media_type=media_type, language=language,
-            )
-        except Exception as exc:
-            logger.warning("facet count fetch failed, omitting counts: %s", exc)
-            return {}
-
-    lang_counts_key = make_key("search_lang_counts", {
-        "query": query, "mode": mode, "media_type": media_type, "access": access,
-    })
-
-    async def _fetch_search_lang_counts() -> dict:
-        counts = await asyncio.to_thread(
-            _safe_fetch_language_counts,
-            query=query, mode=mode, media_type=media_type, access=access,
-        )
-        return {"counts": counts or {}}
-
+    # Per-language ebook counts are global (the OL languages.json call ignores
+    # query/mode/etc), so reuse the one shared key — no per-search refetch.
     lang_counts_payload = await cache.cached(
-        lang_counts_key, TTL_LANG_COUNTS_SECONDS, _fetch_search_lang_counts,
+        LANG_COUNTS_KEY, TTL_LANG_COUNTS_SECONDS, _fetch_lang_counts,
     )
     language_counts = lang_counts_payload.get("counts") or None
 
-    async def _fetch() -> dict:
-        search_response, availability_counts = await asyncio.gather(
-            asyncio.to_thread(
-                _search,
-                provider,
-                query=query,
-                limit=limit,
-                offset=(page - 1) * limit,
-                sort=sort,
-                facets={"mode": mode},
-                language=language,
-                title=title,
-                require_cover=False,
-                media_type=media_type,
-                access=access,
-            ),
-            asyncio.to_thread(_fetch_facet_counts_safe, query),
+    def _build():
+        return build_search_page(
+            provider, base, query=query, limit=limit, page=page, sort=sort, mode=mode,
+            title=title, language=language, media_type=media_type, access=access,
+            language_counts=language_counts, self_href=self_href,
         )
 
-        safe_total = _safe_total(getattr(search_response, "total", None))
-        if safe_total != getattr(search_response, "total", None):
-            logger.warning("search response returned invalid total=%r; defaulting to 0", getattr(search_response, "total", None))
-        search_response.total = safe_total
-        availability_counts[mode] = safe_total
-
-        catalog = Catalog.create(
-            metadata=Metadata(title=title or "Search Results"),
-            response=search_response,
-            links=[
-                Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
-                *_common_links(base),
-            ],
-            facets=_call_provider_compat(
-                OpenLibraryDataProvider.build_facets,
-                base_url=base,
-                query=query,
-                sort=sort,
-                mode=mode,
-                language=language,
-                title=title,
-                total=safe_total,
-                availability_counts=availability_counts,
-                media_type=media_type,
-                access=access,
-                language_counts=language_counts,
-            ),
-        )
-        return catalog.model_dump()
-
-    data = await _fetch()
-    return opds_response(data)
+    # Cache every search response on-demand (first hit builds + stores, the rest
+    # serve from cache) so repeated searches and facet/availability/media/access/
+    # language filtering all hit cache. Featured-subject feeds get the longer
+    # subject TTL (they're also pre-warmed); other searches a shorter TTL. The
+    # unbounded query space is bounded by memcached LRU eviction + TTL.
+    key = _search_cache_key(query, sort, limit, page, mode, language, media_type, access)
+    if _is_featured_search(query, sort):
+        ttl, stale = TTL_SUBJECT_SECONDS, TTL_SUBJECT_STALE_SECONDS
+    else:
+        ttl, stale = TTL_SEARCH_SECONDS, TTL_SEARCH_STALE_SECONDS
+    data = await cache.cached_swr(key, ttl, stale, _build)
+    return opds_response(request, data, max_age=ttl, cache_status=last_cache_status())
 
 
 @router.get("/books/{edition_olid}", summary="OPDS 2.0 single edition")
@@ -414,7 +510,7 @@ async def opds_books(
         return resp.records[0].to_publication().model_dump()
 
     data = await cache.cached(key, TTL_BOOK_SECONDS, _fetch)
-    return opds_pub_response(data)
+    return opds_pub_response(request, data, max_age=TTL_BOOK_SECONDS, cache_status=last_cache_status())
 
 
 @router.get("/authors/{olid}", summary="OPDS 2.0 author catalog")
@@ -517,4 +613,4 @@ async def opds_authors(
         return catalog.model_dump()
 
     data = await cache.cached(catalog_key, TTL_AUTHOR_CATALOG_SECONDS, _fetch_catalog)
-    return opds_response(data)
+    return opds_response(request, data, max_age=TTL_AUTHOR_CATALOG_SECONDS, cache_status=last_cache_status())
