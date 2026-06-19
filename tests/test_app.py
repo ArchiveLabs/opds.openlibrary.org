@@ -749,6 +749,14 @@ class TestHomeCacheDevMode:
         expected = cache_module.TTL_HOME_NONDEFAULT_SECONDS
         assert abs(ttl - expected) <= expected * 0.10 + 1
 
+    def test_search_is_cached_on_demand(self, mock_empty_search):
+        """Every /search response (incl. free-text + facet filters) routes through
+        the cache, so a repeat hit serves from store instead of OL."""
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/search?query=python&mode=ebooks")
+        assert any(k.startswith("opds:search:") for k, _ in rec.cached_calls)
+
 
 # ---------------------------------------------------------------------------
 # strip_markdown
@@ -1789,3 +1797,28 @@ class TestProviderVersionSkew:
         with patch.object(OpenLibraryDataProvider, "fetch_language_counts", staticmethod(boom)):
             resp = client.get("/")
         assert resp.status_code == 200
+
+
+class TestHttpCaching:
+    """ETag / Cache-Control / conditional-GET behavior on OPDS responses."""
+
+    def test_home_sets_etag_and_cache_control(self, mock_empty_search):
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert resp.headers.get("etag")
+        assert "max-age=" in resp.headers.get("cache-control", "")
+        assert resp.headers.get("x-cache") in ("HIT", "MISS")
+
+    def test_conditional_get_returns_304(self, mock_empty_search):
+        first = client.get("/")
+        assert first.status_code == 200
+        etag = first.headers["etag"]
+        second = client.get("/", headers={"If-None-Match": etag})
+        assert second.status_code == 304
+        assert second.content == b""
+        assert second.headers.get("etag") == etag
+
+    def test_mismatched_etag_returns_full_body(self, mock_empty_search):
+        resp = client.get("/", headers={"If-None-Match": '"stale-etag"'})
+        assert resp.status_code == 200
+        assert resp.content  # full body served

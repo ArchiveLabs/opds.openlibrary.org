@@ -4,58 +4,80 @@ import asyncio
 from contextlib import asynccontextmanager
 import logging
 import os
-import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.cache import get_cache, LANG_OPTIONS_KEY, TTL_LANG_OPTIONS_SECONDS
+from app.cache import get_cache
 from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
-from app.logger import get_logger
+from app.logger import get_logger, set_worker_label
 from app.routes.opds import router as opds_router
 from app.sentry import init_sentry
-from app.config import ENVIRONMENT
+from app.config import (
+    ENVIRONMENT,
+    OPDS_BASE_URL,
+    OL_MAX_CONCURRENT_REQUESTS,
+)
+from app.ol_throttle import (
+    client_ip_from_request,
+    install_ol_request_throttle,
+    reset_client_ip,
+    set_client_ip,
+)
+from app.warmup import start_warmer
 
 logger = get_logger(__name__)
 
 sentry_enabled = init_sentry()
 
 
-def _warm_language_cache() -> None:
-    """On startup: warm pyopds2_openlibrary's in-process language cache.
-
-    Tries Memcached first (fast, survives restarts). Falls back to fetching
-    from OL and storing the result in Memcached for the next startup.
-    """
-    import pyopds2_openlibrary as _ol
-    cache = get_cache()
-
-    cached_data = cache.get(LANG_OPTIONS_KEY)
-    if cached_data:
-        _ol._languages_map_cache = cached_data["map"]
-        _ol._languages_names_cache = cached_data["names"]
-        _ol._languages_map_fetched_at = time.monotonic()
-        logger.info("language cache warmed from Memcached (%d languages)", len(cached_data["map"]))
+def _assign_worker_number() -> None:
+    """Hand each worker a friendly ordinal (1, 2, …) via a shared memcached
+    counter, so logs read ``[worker 1]`` instead of an opaque PID. Best-effort:
+    falls back to the PID label if memcached is unavailable. The counter carries
+    a short TTL so numbering resets to 1,2,… on each boot (workers start within
+    the window) rather than growing across restarts."""
+    backend = get_cache()
+    client = getattr(backend, "_get_client", lambda: None)()
+    if client is None:
         return
-
     try:
-        _ol.fetch_languages_map()
-        if _ol._languages_map_cache:
-            cache.set(LANG_OPTIONS_KEY, {
-                "map": _ol._languages_map_cache,
-                "names": _ol._languages_names_cache,
-            }, TTL_LANG_OPTIONS_SECONDS)
-            logger.info("language map fetched from OL on startup (%d languages)", len(_ol._languages_map_cache))
-    except Exception as exc:
-        logger.warning("could not warm language cache on startup: %s", exc)
+        client.add("opds:worker_seq", b"0", expire=300)
+        n = client.incr("opds:worker_seq", 1)
+        if n:
+            set_worker_label(n)
+    except Exception:
+        pass  # keep the PID fallback
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    _assign_worker_number()
     logger.info("OPDS service starting up (sentry=%s)", sentry_enabled)
+    # Bound outbound OL concurrency before any warming/serving to avoid 429s.
+    install_ol_request_throttle(OL_MAX_CONCURRENT_REQUESTS)
+    logger.info(
+        "startup config: ENVIRONMENT=%s OPDS_BASE_URL=%s", ENVIRONMENT, OPDS_BASE_URL,
+    )
+    warmer_task: asyncio.Task | None = None
     if ENVIRONMENT != "test":
-        await asyncio.to_thread(_warm_language_cache)
+        base = OPDS_BASE_URL.rstrip("/") if OPDS_BASE_URL else None
+        if not base:
+            logger.warning(
+                "homepage warming disabled: OPDS_BASE_URL is unset, so the cache-key "
+                "base is per-request and cannot be warmed. Set OPDS_BASE_URL to the "
+                "public base (e.g. https://openlibrary.org/opds) to enable it."
+            )
+        # Non-blocking: the warmer (app/warmup.py) elects a single leader and
+        # keeps home + subjects warm; startup completes immediately.
+        warmer_task = start_warmer(base)
     yield
+    if warmer_task is not None:
+        warmer_task.cancel()
+        try:
+            await warmer_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
@@ -67,6 +89,17 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@app.middleware("http")
+async def _forward_client_ip(request: Request, call_next):
+    """Stash the originating client IP so outbound OL requests can forward it
+    as X-Forwarded-For (OL rate-limits per end user, not per server IP)."""
+    token = set_client_ip(client_ip_from_request(request))
+    try:
+        return await call_next(request)
+    finally:
+        reset_client_ip(token)
 
 
 class EndpointFilter(logging.Filter):
