@@ -1618,18 +1618,6 @@ class TestFacetCountsLanguage:
         # Every counted (non-buyable) mode must carry the language.
         assert seen and all(lang == "zu" for _, lang in seen)
 
-    def test_search_route_passes_language_to_facet_counts(self):
-        captured: dict = {}
-
-        def fake_counts(query, media_type=None, language=None):
-            captured["language"] = language
-            return _FAKE_AVAILABILITY_COUNTS.copy()
-
-        with patch(SEARCH_PATCH_TARGET, return_value=_make_search_response()), \
-             patch(FACET_COUNTS_PATCH_TARGET, side_effect=fake_counts):
-            client.get("/search?query=test&language=zu")
-        assert captured.get("language") == "zu"
-
 
 class TestHomeEmptyGroupsFilteredBeforePagination:
     """Bug 3: empty carousels were dropped *after* pagination, so a page whose

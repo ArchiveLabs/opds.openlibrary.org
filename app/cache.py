@@ -19,8 +19,8 @@ logger = get_logger(__name__)
 # TTL constants (module-level — pure data)
 # ---------------------------------------------------------------------------
 
-TTL_HOME_DEFAULT_SECONDS    = 2 * 60
-TTL_HOME_NONDEFAULT_SECONDS = 15 * 60
+TTL_HOME_DEFAULT_SECONDS    = 1 * 60
+TTL_HOME_NONDEFAULT_SECONDS = 1 * 60
 TTL_TRENDING_SECONDS        = 1 * 60
 TTL_BOOK_SECONDS            = 6 * 60 * 60
 TTL_AUTHOR_BIO_SECONDS      = 24 * 60 * 60

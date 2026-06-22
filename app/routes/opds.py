@@ -225,6 +225,17 @@ async def opds_home(
                 "map": _ol_module._languages_map_cache,
                 "names": _ol_module._languages_names_cache,
             }, TTL_LANG_OPTIONS_SECONDS)
+        # Seed the Trending Books short-TTL cache from the freshly fetched home
+        # data so the overlay below doesn't fire a duplicate Solr query on a
+        # cold home cache.  On warm-cache SWR background refreshes the overlay
+        # may still fire concurrently, but that case has no user-visible impact.
+        trending_group = next(
+            (g for g in data.get("groups", [])
+             if isinstance(g, dict) and g.get("metadata", {}).get("title") == "Trending Books"),
+            None,
+        )
+        if trending_group and trending_group.get("publications"):
+            cache.set(trending_key, trending_group, TTL_TRENDING_SECONDS)
         return data
 
     async def _fetch_trending() -> dict:
@@ -313,18 +324,6 @@ async def opds_search(
     provider = get_provider(base)
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
 
-    def _fetch_facet_counts_safe(q: str) -> dict:
-        try:
-            # Via the compat shim so an older provider without the ``language``
-            # parameter still returns counts (unscoped) instead of erroring out.
-            return _call_provider_compat(
-                OpenLibraryDataProvider.fetch_facet_counts,
-                query=q, media_type=media_type, language=language,
-            )
-        except Exception as exc:
-            logger.warning("facet count fetch failed, omitting counts: %s", exc)
-            return {}
-
     lang_counts_key = make_key("search_lang_counts", {
         "query": query, "mode": mode, "media_type": media_type, "access": access,
     })
@@ -342,29 +341,26 @@ async def opds_search(
     language_counts = lang_counts_payload.get("counts") or None
 
     async def _fetch() -> dict:
-        search_response, availability_counts = await asyncio.gather(
-            asyncio.to_thread(
-                _search,
-                provider,
-                query=query,
-                limit=limit,
-                offset=(page - 1) * limit,
-                sort=sort,
-                facets={"mode": mode},
-                language=language,
-                title=title,
-                require_cover=False,
-                media_type=media_type,
-                access=access,
-            ),
-            asyncio.to_thread(_fetch_facet_counts_safe, query),
+        search_response = await asyncio.to_thread(
+            _search,
+            provider,
+            query=query,
+            limit=limit,
+            offset=(page - 1) * limit,
+            sort=sort,
+            facets={"mode": mode},
+            language=language,
+            title=title,
+            require_cover=False,
+            media_type=media_type,
+            access=access,
         )
 
         safe_total = _safe_total(getattr(search_response, "total", None))
         if safe_total != getattr(search_response, "total", None):
             logger.warning("search response returned invalid total=%r; defaulting to 0", getattr(search_response, "total", None))
         search_response.total = safe_total
-        availability_counts[mode] = safe_total
+        availability_counts: dict = {}
 
         catalog = Catalog.create(
             metadata=Metadata(title=title or "Search Results"),
