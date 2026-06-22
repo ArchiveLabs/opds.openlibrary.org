@@ -103,42 +103,49 @@ source env/bin/activate   # Windows: env\Scripts\activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Start the server
-uvicorn app.main:app --reload --port 8080
+# 3. Start the server (cache disabled so every request hits the real fetch path)
+make serve
+# or: CACHE_ENABLED=false uvicorn app.main:app --host 127.0.0.1 --port 8090 --reload
 ```
+
+> **Note on docker-compose:** `docker-compose.yml` hard-codes the build context path, so
+> it only works when the repo is checked out as `opds.openlibrary.org` exactly. For
+> worktrees or forks with different directory names, use `make serve` instead.
 
 ---
 
-## Testing the endpoints
+## Running tests
+
+### Offline unit tests (no service required)
 
 ```bash
-# Homepage catalog
-curl -s http://localhost:8080/ | python -m json.tool | head -30
-
-# Search
-curl -s "http://localhost:8080/search?query=Python&limit=5" | python -m json.tool | head -30
-
-# Single edition
-curl -s http://localhost:8080/books/OL7353617M | python -m json.tool | head -30
-
-# Author catalog (bio + paginated books)
-curl -s "http://localhost:8080/authors/OL1A" | python -m json.tool | head -30
-
-# 404 — non-existent edition
-curl -s http://localhost:8080/books/OL0000000M
-# → {"detail": "Edition not found: OL0000000M"}
+make test
+# or: pytest tests/ -m "not e2e" -v
 ```
 
----
+All unit tests mock network calls and run without a live service or Docker.
 
-## Running automated tests
+### End-to-end tests (live service required)
+
+E2e tests hit a running instance and verify real response structure, including
+behavioural invariants that protect against performance regressions — for
+example, that availability facet links do not carry `numberOfItems` (which
+would mean expensive per-mode Solr queries have been re-introduced).
 
 ```bash
-pip install pytest httpx
-pytest -v
+# Start a local instance and run e2e tests in one command:
+make test-e2e
+
+# Or test against any running instance:
+make test-e2e BASE_URL=https://opds.openlibrary.org
+
+# Or run the service and tests separately:
+make serve                              # terminal 1
+pytest tests/test_e2e.py -m e2e -v    # terminal 2
 ```
 
-All tests are offline — network calls to OpenLibrary are mocked.
+E2e tests are skipped by default (`pytest` without `-m e2e`) to keep CI fast.
+Run them manually before opening a PR or after deploying to any environment.
 
 ---
 
