@@ -25,8 +25,6 @@ from app.cache import (
     TTL_HOME_NONDEFAULT_SECONDS,
     TTL_LANG_COUNTS_SECONDS,
     TTL_LANG_OPTIONS_SECONDS,
-    TTL_TRENDING_SECONDS,
-    TTL_TRENDING_STALE_SECONDS,
     get_cache,
     make_key,
 )
@@ -179,12 +177,6 @@ async def opds_home(
         "page": page, "media_type": media_type, "access": access,
         "limit": limit,
     })
-    # Trending group gets its own short-TTL key shared across pages/base variants.
-    trending_key = make_key("home_trending", {
-        "mode": mode, "language": language,
-        "media_type": media_type, "access": access,
-        "limit": limit,
-    })
     # Language facet counts: one Solr facet call per (mode, media_type, access).
     # Shared across home pages so paging the homepage doesn't re-fetch.
     lang_counts_key = make_key("home_lang_counts", {
@@ -225,83 +217,21 @@ async def opds_home(
                 "map": _ol_module._languages_map_cache,
                 "names": _ol_module._languages_names_cache,
             }, TTL_LANG_OPTIONS_SECONDS)
-        # Seed the Trending Books short-TTL cache from the freshly fetched home
-        # data so the overlay below doesn't fire a duplicate Solr query on a
-        # cold home cache.  On warm-cache SWR background refreshes the overlay
-        # may still fire concurrently, but that case has no user-visible impact.
-        trending_group = next(
-            (g for g in data.get("groups", [])
-             if isinstance(g, dict) and g.get("metadata", {}).get("title") == "Trending Books"),
-            None,
-        )
-        if trending_group and trending_group.get("publications"):
-            cache.set(trending_key, trending_group, TTL_TRENDING_SECONDS)
         return data
-
-    async def _fetch_trending() -> dict:
-        """Fetch the Trending Books group independently for short-TTL refresh.
-
-        Always populates trending_key so the overlay has a consistent structure.
-        Uses _search() to get proper httpx error → UpstreamError wrapping.
-        """
-        groups_config = OpenLibraryDataProvider._home_groups_config(mode, language)
-        trending = next((g for g in groups_config if g[0] == "Trending Books"), None)
-        if not trending:
-            return {}
-        t_title, t_query, t_sort = trending
-        # Honor the user-supplied ``limit`` so the SWR-refreshed trending overlay
-        # stays the same shape as the rest of the page's carousels.
-        trending_limit = limit if limit > 0 else 25
-        resp = await asyncio.to_thread(
-            _search,
-            provider,
-            query=t_query,
-            sort=t_sort,
-            limit=trending_limit,
-            language=language,
-            facets={"mode": mode},
-            title=t_title,
-            require_cover=False,
-            media_type=media_type,
-            access=access,
-        )
-        group_catalog = Catalog.create(
-            metadata=Metadata(title=t_title, description=_OL_GROUP_DESCRIPTIONS.get(t_title)),
-            response=resp,
-        )
-        return group_catalog.model_dump()
 
     # Reject empty payloads — a homepage with no groups means every upstream
     # group fetch failed (e.g. OL 403/500) and caching it would pin a blank
-    # response for the full TTL. A trending overlay without publications is
-    # equally useless. Validators run on both reads and writes.
+    # response for the full TTL.
     def _home_is_valid(d: dict) -> bool:
         return bool(d.get("groups"))
 
-    def _trending_is_valid(d: dict) -> bool:
-        return bool(d.get("publications"))
-
-    # Full page served via stale-while-revalidate for every variant. Cold OL
-    # Solr hits cost 30–40 s; serving the stale copy and refreshing in the
-    # background keeps language/mode/facet switches snappy after the first hit.
+    # Full page served via stale-while-revalidate. Cold OL Solr hits cost
+    # 30–40 s; serving the stale copy and refreshing in the background keeps
+    # language/mode/facet switches snappy after the first hit.
     data = await cache.cached_swr(
         home_key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, _fetch_full,
         is_valid=_home_is_valid,
     )
-
-    # Trending group overlaid via SWR so the 60s refresh never blocks a user.
-    groups = data.get("groups", [])
-    if any(g.get("metadata", {}).get("title") == "Trending Books" for g in groups):
-        fresh_trending = await cache.cached_swr(
-            trending_key, TTL_TRENDING_SECONDS, TTL_TRENDING_STALE_SECONDS, _fetch_trending,
-            is_valid=_trending_is_valid,
-        )
-        if fresh_trending:
-            data = {**data, "groups": [
-                fresh_trending if g.get("metadata", {}).get("title") == "Trending Books" else g
-                for g in groups
-            ]}
-
     return opds_response(data)
 
 

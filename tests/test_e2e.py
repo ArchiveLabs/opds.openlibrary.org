@@ -69,7 +69,11 @@ def test_home_page2_returns_groups(client: httpx.Client) -> None:
 
 @pytest.mark.e2e
 def test_home_no_duplicate_trending(client: httpx.Client) -> None:
-    """Trending Books must appear at most once across all home-feed groups."""
+    """Trending Books must appear at most once across all home-feed groups.
+
+    Guards against regressions in pyopds2_openlibrary's build_home_feed that
+    might duplicate a carousel group in the returned data.
+    """
     r = client.get("/")
     assert r.status_code == 200
     trending_groups = [
