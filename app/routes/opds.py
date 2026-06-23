@@ -100,19 +100,21 @@ def _search(provider: OpenLibraryDataProvider, **kwargs):
         return _call_provider_compat(provider.search, **kwargs)
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code
-        logger.error("upstream HTTP error status=%s url=%s", status_code, exc.request.url)
         if status_code == 429:
             retry_after = exc.response.headers.get("Retry-After", "unknown")
             logger.warning("OL rate-limited OPDS request (Retry-After: %s) url=%s", retry_after, exc.request.url)
             with sentry_sdk.new_scope() as scope:
-                scope.set_tag("ol_rate_limited", True)
+                scope.set_tag("ol_rate_limited", "true")
+                scope.set_fingerprint(["ol-rate-limited"])
                 scope.set_extra("url", str(exc.request.url))
                 scope.set_extra("retry_after", retry_after)
                 scope.set_extra("query", kwargs.get("query", ""))
                 sentry_sdk.capture_message(
-                    f"OL rate-limited OPDS request (Retry-After: {retry_after})",
+                    "OL rate-limited OPDS request",
                     level="warning",
                 )
+        else:
+            logger.error("upstream HTTP error status=%s url=%s", status_code, exc.request.url)
         raise UpstreamError(
             f"OpenLibrary returned {status_code}",
             status_code=status_code,
