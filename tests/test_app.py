@@ -1777,3 +1777,105 @@ class TestProviderVersionSkew:
         with patch.object(OpenLibraryDataProvider, "fetch_language_counts", staticmethod(boom)):
             resp = client.get("/")
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Issue #38: 429 responses from OL must be captured in Sentry for visibility.
+# ---------------------------------------------------------------------------
+
+class TestRateLimitSentryCapture:
+    """Verify that OL 429 responses are sent to Sentry as warning events."""
+
+    def _make_429_error(self, url="https://openlibrary.org/search.json", retry_after="60"):
+        """Build an httpx.HTTPStatusError for a 429 response."""
+        request = httpx.Request("GET", url)
+        response = httpx.Response(429, headers={"Retry-After": retry_after}, request=request)
+        return httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    def _sentry_patches(self, mock_capture):
+        """Common sentry patches: new_scope as context manager + capture_message.
+
+        Returns (scope_patch, capture_patch, mock_scope) so callers can assert
+        on scope.set_extra / scope.set_fingerprint / scope.set_tag calls.
+        """
+        mock_scope = MagicMock()
+        mock_scope.__enter__ = MagicMock(return_value=mock_scope)
+        mock_scope.__exit__ = MagicMock(return_value=False)
+        return (
+            patch("app.routes.opds.sentry_sdk.new_scope", return_value=mock_scope),
+            patch("app.routes.opds.sentry_sdk.capture_message", mock_capture),
+            mock_scope,
+        )
+
+    def test_429_captured_as_sentry_warning(self):
+        """When OL returns 429, sentry_sdk.capture_message is called at warning level."""
+        exc_429 = self._make_429_error()
+        mock_capture = MagicMock()
+        scope_patch, capture_patch, _ = self._sentry_patches(mock_capture)
+        with (
+            patch("app.routes.opds.OpenLibraryDataProvider.search", side_effect=exc_429),
+            patch("app.routes.opds.OpenLibraryDataProvider.fetch_language_counts", return_value={}),
+            scope_patch,
+            capture_patch,
+        ):
+            resp = client.get("/search?query=python")
+        assert resp.status_code == 502  # 429 from OL surfaces as 502 UpstreamError
+        mock_capture.assert_called_once()
+        message, = mock_capture.call_args.args
+        assert "rate-limited" in message.lower()
+        assert mock_capture.call_args.kwargs.get("level") == "warning"
+
+    def test_non_429_errors_do_not_capture_sentry(self):
+        """Non-rate-limit HTTP errors must NOT trigger a Sentry capture_message."""
+        request = httpx.Request("GET", "https://openlibrary.org/search.json")
+        response = httpx.Response(500, request=request)
+        exc_500 = httpx.HTTPStatusError("server error", request=request, response=response)
+        mock_capture = MagicMock()
+        scope_patch, capture_patch, _ = self._sentry_patches(mock_capture)
+        with (
+            patch("app.routes.opds.OpenLibraryDataProvider.search", side_effect=exc_500),
+            patch("app.routes.opds.OpenLibraryDataProvider.fetch_language_counts", return_value={}),
+            scope_patch,
+            capture_patch,
+        ):
+            resp = client.get("/search?query=python")
+        assert resp.status_code == 502
+        mock_capture.assert_not_called()
+
+    def test_retry_after_header_value_in_sentry_extras(self):
+        """Retry-After header value must appear in Sentry scope extras, not the message.
+
+        The capture_message text is stable so all 429s group into one Sentry
+        issue; the per-event Retry-After value lives in extras for analysis.
+        """
+        exc_429 = self._make_429_error(retry_after="120")
+        mock_capture = MagicMock()
+        scope_patch, capture_patch, mock_scope = self._sentry_patches(mock_capture)
+        with (
+            patch("app.routes.opds.OpenLibraryDataProvider.search", side_effect=exc_429),
+            patch("app.routes.opds.OpenLibraryDataProvider.fetch_language_counts", return_value={}),
+            scope_patch,
+            capture_patch,
+        ):
+            client.get("/search?query=test")
+        mock_capture.assert_called_once()
+        mock_scope.set_extra.assert_any_call("retry_after", "120")
+        mock_scope.set_fingerprint.assert_called_once_with(["ol-rate-limited"])
+        mock_scope.set_tag.assert_any_call("ol_rate_limited", "true")
+
+    def test_retry_after_header_absent_defaults_to_unknown(self):
+        """When Retry-After is absent, extras must record 'unknown' as the value."""
+        request = httpx.Request("GET", "https://openlibrary.org/search.json")
+        response = httpx.Response(429, request=request)  # no Retry-After header
+        exc_429 = httpx.HTTPStatusError("rate limited", request=request, response=response)
+        mock_capture = MagicMock()
+        scope_patch, capture_patch, mock_scope = self._sentry_patches(mock_capture)
+        with (
+            patch("app.routes.opds.OpenLibraryDataProvider.search", side_effect=exc_429),
+            patch("app.routes.opds.OpenLibraryDataProvider.fetch_language_counts", return_value={}),
+            scope_patch,
+            capture_patch,
+        ):
+            client.get("/search?query=test")
+        mock_capture.assert_called_once()
+        mock_scope.set_extra.assert_any_call("retry_after", "unknown")
