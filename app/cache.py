@@ -19,9 +19,8 @@ logger = get_logger(__name__)
 # TTL constants (module-level — pure data)
 # ---------------------------------------------------------------------------
 
-TTL_HOME_DEFAULT_SECONDS    = 2 * 60
-TTL_HOME_NONDEFAULT_SECONDS = 15 * 60
-TTL_TRENDING_SECONDS        = 1 * 60
+TTL_HOME_DEFAULT_SECONDS    = 1 * 60
+TTL_HOME_NONDEFAULT_SECONDS = 1 * 60
 TTL_BOOK_SECONDS            = 6 * 60 * 60
 TTL_AUTHOR_BIO_SECONDS      = 24 * 60 * 60
 TTL_AUTHOR_CATALOG_SECONDS  = 1 * 60 * 60
@@ -32,11 +31,10 @@ TTL_LANG_OPTIONS_SECONDS    = 7 * 24 * 60 * 60   # 7 days
 # within a typical content-rotation cycle.
 TTL_LANG_COUNTS_SECONDS     = 7 * 24 * 60 * 60
 
-# Stale-while-revalidate windows: after fresh_ttl elapses, served value is
+# Stale-while-revalidate window: after fresh_ttl elapses, served value is
 # returned immediately and a background refresh kicks off. stale_ttl caps how
 # long the stale value survives if no traffic triggers refresh.
 TTL_HOME_DEFAULT_STALE_SECONDS = 30 * 60
-TTL_TRENDING_STALE_SECONDS     = 10 * 60
 
 LANG_OPTIONS_KEY = "opds:lang_options"
 
