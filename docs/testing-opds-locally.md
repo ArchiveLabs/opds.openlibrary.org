@@ -4,6 +4,25 @@ How to run the OPDS service locally (against real openlibrary.org data), expose 
 
 ---
 
+## TL;DR
+
+```bash
+# 1. Run automated smoke tests (starts service, tests, tears down)
+make test-e2e
+
+# 2. Test a local pyopds2_openlibrary branch
+make test-e2e LIB=~/Projects/pyopds2_openlibrary-<branch-slug>
+
+# 3. Expose to reader.archive.org for manual end-to-end verification
+make serve &
+make tunnel
+# Open: https://reader.archive.org/?opds=https://<slug>.trycloudflare.com
+```
+
+`make test-e2e` covers: health check, home feed groups, search results, availability facet regression guard (`numberOfItems` must be absent), pagination, book detail, author detail.
+
+---
+
 ## Prerequisites
 
 - Python 3.11+ with `uvicorn`, `httpx`, and service dependencies installed
