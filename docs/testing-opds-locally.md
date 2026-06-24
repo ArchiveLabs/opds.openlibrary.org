@@ -57,11 +57,14 @@ python3 -c "import pyopds2_openlibrary; print(pyopds2_openlibrary.__file__)"
 cd ~/Projects/opds.openlibrary.org
 
 CACHE_ENABLED=false \
+CORS_ENABLED=true \
 OL_BASE_URL=https://openlibrary.org \
 uvicorn app.main:app --host 127.0.0.1 --port 8090
 ```
 
 `CACHE_ENABLED=false` ensures every request hits OL directly — no stale cache responses during testing.
+
+`CORS_ENABLED=true` adds CORS headers so browser clients (e.g. reader.archive.org) can consume the feed. It is off by default because production's fronting nginx already supplies CORS — enabling it there would emit a duplicate `Access-Control-Allow-Origin` header and break browsers. (`make serve` sets both for you.)
 
 Verify the service is up:
 
@@ -190,5 +193,5 @@ pkill -f "uvicorn app.main"
 | Port 8090 already in use | `pkill -f "uvicorn app.main"` or change port |
 | Tunnel URL not resolving yet | Wait 10–15 s after the URL appears before testing |
 | `docker-compose.yml` fails if worktree is not named `opds.openlibrary.org` | Use `uvicorn` directly (this guide); the compose file hard-codes that path |
-| reader.archive.org CORS error | Ensure `CORSMiddleware` is in `app/main.py` (added in PR #41) |
+| reader.archive.org CORS error | Start the service with `CORS_ENABLED=true` (or use `make serve`) so the app emits CORS headers locally |
 | Home feed returns 0 groups | OL is rate-limiting or unreachable; check `/health` and OL status |

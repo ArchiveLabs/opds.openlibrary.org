@@ -7,7 +7,6 @@ import os
 import time
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.cache import get_cache, LANG_OPTIONS_KEY, TTL_LANG_OPTIONS_SECONDS
@@ -15,7 +14,7 @@ from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
 from app.logger import get_logger
 from app.routes.opds import router as opds_router
 from app.sentry import init_sentry
-from app.config import ENVIRONMENT
+from app.config import CORS_ENABLED, ENVIRONMENT
 
 logger = get_logger(__name__)
 
@@ -69,14 +68,20 @@ app = FastAPI(
     openapi_url=None,
 )
 
-# OPDS is a public read-only catalog API — allow any origin so browser-based
-# OPDS clients (reader.archive.org, web extensions, etc.) can consume it.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
+# OPDS is a public read-only catalog API. In production the fronting nginx
+# already supplies CORS headers; enabling this here would duplicate
+# ``Access-Control-Allow-Origin`` and break browser clients. Gate it behind
+# CORS_ENABLED so local dev without nginx (e.g. the Cloudflare tunnel to
+# reader.archive.org) can still be consumed by browsers.
+if CORS_ENABLED:
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET"],
+        allow_headers=["*"],
+    )
 
 
 class EndpointFilter(logging.Filter):
