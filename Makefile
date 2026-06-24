@@ -6,9 +6,11 @@ install:
 
 # Start the service locally against real openlibrary.org.
 # Cache is disabled so every request exercises the full fetch path.
+# CORS is enabled because there's no fronting nginx locally — browser clients
+# (e.g. reader.archive.org via the Cloudflare tunnel) need the headers.
 # Use port 8090 to avoid conflicting with OL Docker on 8080.
 serve:
-	CACHE_ENABLED=false OL_BASE_URL=https://openlibrary.org \
+	CACHE_ENABLED=false CORS_ENABLED=true OL_BASE_URL=https://openlibrary.org \
 	  uvicorn app.main:app --host 127.0.0.1 --port 8090 --reload
 
 # Offline unit tests — no live service required

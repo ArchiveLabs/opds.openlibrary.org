@@ -30,6 +30,13 @@ except ValueError:
     raise ValueError(f"MEMCACHE_PORT must be an integer, got: {_memcache_port_raw!r}") from None
 CACHE_ENABLED: bool = os.environ.get("CACHE_ENABLED", "true").lower() == "true"
 
+# App-level CORS. Off by default: in production the fronting nginx already adds
+# CORS headers, so enabling this here would emit a duplicate
+# ``Access-Control-Allow-Origin`` and break browser clients. Enable it for local
+# development (e.g. the Cloudflare-tunnel-to-reader.archive.org flow) where no
+# nginx sits in front. See docs/testing-opds-locally.md.
+CORS_ENABLED: bool = os.environ.get("CORS_ENABLED", "false").lower() == "true"
+
 SENTRY_DSN: str | None = os.environ.get(
     "SENTRY_DSN",
     "https://8d8cab445edc9b4e452ba06d0be46dcb@sentry.archive.org/73",
@@ -71,4 +78,5 @@ __all__ = [
     "MEMCACHE_HOST",
     "MEMCACHE_PORT",
     "CACHE_ENABLED",
+    "CORS_ENABLED",
 ]
