@@ -7,7 +7,6 @@ import os
 import time
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.cache import get_cache, LANG_OPTIONS_KEY, TTL_LANG_OPTIONS_SECONDS
@@ -67,15 +66,6 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
-)
-
-# OPDS is a public read-only catalog API — allow any origin so browser-based
-# OPDS clients (reader.archive.org, web extensions, etc.) can consume it.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["*"],
 )
 
 
