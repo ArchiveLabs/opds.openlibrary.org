@@ -163,6 +163,32 @@ def _safe_fetch_language_counts(**kwargs) -> dict:
         return {}
 
 
+# Language facet counts (ebook_edition_count per language) are GLOBAL — they do
+# not depend on the query/mode/media_type/access context (see the docstring on
+# ``fetch_language_counts``). So they're cached under one service-wide key and
+# shared by every home and search request, instead of re-fetching the identical
+# ``languages.json`` payload per unique query. This turns a near-guaranteed
+# per-query cache miss (a serial ~0.7-1.5s tax in front of every search) into a
+# near-guaranteed hit.
+GLOBAL_LANG_COUNTS_KEY = make_key("global_lang_counts", {})
+
+
+async def _cached_language_counts(cache: CacheBackend) -> Optional[dict]:
+    """Return the global ``{iso: ebook_count}`` map, cached service-wide.
+
+    Returns ``None`` (not ``{}``) when unavailable so callers degrade to the
+    unfiltered language list rather than hiding every language.
+    """
+    async def _fetch() -> dict:
+        counts = await asyncio.to_thread(_safe_fetch_language_counts)
+        return {"counts": counts or {}}
+
+    payload = await cache.cached(
+        GLOBAL_LANG_COUNTS_KEY, TTL_LANG_COUNTS_SECONDS, _fetch,
+    )
+    return payload.get("counts") or None
+
+
 try:
     from pyopds2_openlibrary import _GROUP_DESCRIPTIONS as _OL_GROUP_DESCRIPTIONS
 except ImportError:
@@ -193,26 +219,9 @@ async def opds_home(
         "page": page, "media_type": media_type, "access": access,
         "limit": limit,
     })
-    # Language facet counts: one Solr facet call per (mode, media_type, access).
-    # Shared across home pages so paging the homepage doesn't re-fetch.
-    lang_counts_key = make_key("home_lang_counts", {
-        "mode": mode, "media_type": media_type, "access": access,
-    })
-
-    async def _fetch_lang_counts() -> dict:
-        counts = await asyncio.to_thread(
-            _safe_fetch_language_counts,
-            query="ebook_access:[* TO *]",
-            mode=mode,
-            media_type=media_type,
-            access=access,
-        )
-        return {"counts": counts or {}}
-
-    lang_counts_payload = await cache.cached(
-        lang_counts_key, TTL_LANG_COUNTS_SECONDS, _fetch_lang_counts,
-    )
-    language_counts = lang_counts_payload.get("counts") or None
+    # Language facet counts are global (see _cached_language_counts) and shared
+    # service-wide, so paging or switching mode/media_type/access never re-fetches.
+    language_counts = await _cached_language_counts(cache)
 
     async def _fetch_full() -> dict:
         data = await asyncio.to_thread(
@@ -270,24 +279,8 @@ async def opds_search(
     provider = get_provider(base)
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
 
-    lang_counts_key = make_key("search_lang_counts", {
-        "query": query, "mode": mode, "media_type": media_type, "access": access,
-    })
-
-    async def _fetch_search_lang_counts() -> dict:
-        counts = await asyncio.to_thread(
-            _safe_fetch_language_counts,
-            query=query, mode=mode, media_type=media_type, access=access,
-        )
-        return {"counts": counts or {}}
-
-    lang_counts_payload = await cache.cached(
-        lang_counts_key, TTL_LANG_COUNTS_SECONDS, _fetch_search_lang_counts,
-    )
-    language_counts = lang_counts_payload.get("counts") or None
-
-    async def _fetch() -> dict:
-        search_response = await asyncio.to_thread(
+    async def _fetch_search():
+        return await asyncio.to_thread(
             _search,
             provider,
             query=query,
@@ -302,38 +295,43 @@ async def opds_search(
             access=access,
         )
 
-        safe_total = _safe_total(getattr(search_response, "total", None))
-        if safe_total != getattr(search_response, "total", None):
-            logger.warning("search response returned invalid total=%r; defaulting to 0", getattr(search_response, "total", None))
-        search_response.total = safe_total
-        availability_counts: dict = {}
+    # The language-facet fetch and the main search are independent, so run them
+    # concurrently. The facet call (languages.json) would otherwise be a serial
+    # ~0.7-1.5s tax in front of the search; overlapping them hides it entirely.
+    language_counts, search_response = await asyncio.gather(
+        _cached_language_counts(cache),
+        _fetch_search(),
+    )
 
-        catalog = Catalog.create(
-            metadata=Metadata(title=title or "Search Results"),
-            response=search_response,
-            links=[
-                Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
-                *_common_links(base),
-            ],
-            facets=_call_provider_compat(
-                OpenLibraryDataProvider.build_facets,
-                base_url=base,
-                query=query,
-                sort=sort,
-                mode=mode,
-                language=language,
-                title=title,
-                total=safe_total,
-                availability_counts=availability_counts,
-                media_type=media_type,
-                access=access,
-                language_counts=language_counts,
-            ),
-        )
-        return catalog.model_dump()
+    safe_total = _safe_total(getattr(search_response, "total", None))
+    if safe_total != getattr(search_response, "total", None):
+        logger.warning("search response returned invalid total=%r; defaulting to 0", getattr(search_response, "total", None))
+    search_response.total = safe_total
+    availability_counts: dict = {}
 
-    data = await _fetch()
-    return opds_response(data)
+    catalog = Catalog.create(
+        metadata=Metadata(title=title or "Search Results"),
+        response=search_response,
+        links=[
+            Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
+            *_common_links(base),
+        ],
+        facets=_call_provider_compat(
+            OpenLibraryDataProvider.build_facets,
+            base_url=base,
+            query=query,
+            sort=sort,
+            mode=mode,
+            language=language,
+            title=title,
+            total=safe_total,
+            availability_counts=availability_counts,
+            media_type=media_type,
+            access=access,
+            language_counts=language_counts,
+        ),
+    )
+    return opds_response(catalog.model_dump())
 
 
 @router.get("/books/{edition_olid}", summary="OPDS 2.0 single edition")
