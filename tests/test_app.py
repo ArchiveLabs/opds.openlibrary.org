@@ -470,6 +470,30 @@ class TestOpdsBooks:
             data = client.get("/books/OL9999999M").json()
         assert "detail" in data
 
+    def test_returns_404_when_edition_has_no_acquisition_link(self):
+        """OL58393454M: a LibriVox work whose only provider is an ``audio``
+        entry produces no acquisition (or IA webpub) link, so the entry must be
+        hidden rather than served as an unusable publication."""
+        librivox_only = {
+            "key": "/works/OL39379W",
+            "title": "A Room of One's Own",
+            "ebook_access": "public",
+            "id_librivox": ["21236"],
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL58393454M",
+                                   "title": "A Room of One's Own",
+                                   "ebook_access": "public",
+                                   "cover_i": 14858513,
+                                   "providers": [{"provider_name": "librivox",
+                                                  "format": "audio",
+                                                  "access": "open-access",
+                                                  "url": "https://librivox.org/21236"}]}]},
+        }
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {"docs": [librivox_only], "numFound": 1}
+            resp = client.get("/books/OL58393454M")
+        assert resp.status_code == 404
+
     def test_self_link_uses_opds_base(self):
         from pyopds2_openlibrary import OpenLibraryDataProvider as OLP
         record = _make_record(edition_key="OL55M")
