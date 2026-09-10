@@ -19,7 +19,7 @@ test:
 
 # End-to-end tests — starts a local service, runs tests, tears down.
 # Override BASE_URL to test a remote instance instead:
-#   make test-e2e BASE_URL=https://opds.openlibrary.org
+#   make test-e2e BASE_URL=https://openlibrary.org/opds
 # To test a local pyopds2_openlibrary branch:
 #   make test-e2e LIB=~/Projects/pyopds2_openlibrary-<slug>
 BASE_URL ?= http://127.0.0.1:8090
