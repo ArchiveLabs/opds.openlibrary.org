@@ -19,16 +19,19 @@ matches nothing.
 | Author Catalog | GET | `^/authors/OL[0-9]+A(\?.*)?$` |
 | Health Check | GET | `^/health$` |
 | Service Worker | GET | `^/sw\.js$` |
+| iCloud asset relay | POST, OPTIONS | `^/icloud/asset(\?.*)?$` |
+| iCloud relay status | GET | `^/icloud/relay-status$` |
 
 ## Combined Allow-List
 
 ```
-^/(\?.*|search(\?.*)?|books/OL[0-9]+M|authors/OL[0-9]+A(\?.*)?|health|sw\.js)?$
+^/(\?.*|search(\?.*)?|books/OL[0-9]+M|authors/OL[0-9]+A(\?.*)?|health|sw\.js|icloud/asset(\?.*)?|icloud/relay-status)?$
 ```
 
 ## Notes
 
-- **Allowed methods**: GET, HEAD, OPTIONS only
+- **Allowed methods**: GET, HEAD, OPTIONS — and **POST on `/icloud/asset` only**. Every other route is GET.
+- **iCloud asset relay**: `/icloud/asset` answers 404 unless `ICLOUD_RELAY_ORIGINS` is configured, so an unconfigured deployment needs neither row. Where it is configured the WAF must pass POST bodies up to 15 MB (Apple's asset ceiling; the app refuses larger itself) and the `to` query parameter, which is a full `https://p<N>-contentws.icloud.com/…/singleFileUpload` URL — the app validates that host and refuses anything else, so the WAF need not
 - **Homepage query params**: `/` takes `mode`, `language`, `page`, `media_type`, `access` and `limit`, and the feed itself links to `/?language=…`, `/?access=…` and `/?page=…` — a homepage pattern without `(\?.*)?` blocks the service's own facet and pagination links
 - **Search query params**: `/search` query parameters contain Solr syntax (`[]`, `*`, `:`, spaces) — the WAF must not block these as injection attempts
 - **Docs endpoints**: `/docs`, `/redoc`, `/openapi.json` are disabled unconditionally in the `FastAPI(...)` constructor; block them at the WAF as well
