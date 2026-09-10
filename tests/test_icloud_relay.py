@@ -8,6 +8,7 @@ relay, and the fact that it is not there at all until configured.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from urllib.parse import quote
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -22,7 +23,13 @@ client = TestClient(app)
 
 ORIGIN = "https://localhost:4173"
 OTHER_ORIGIN = "https://evil.example"
-SLOT = "https://p42-contentws.icloud.com/abc123/singleFileUpload"
+# The form the live web-services token actually issues (observed end to end).
+SLOT = "https://cws.icloud-content.com:443/1166888023/singleFileUpload?tk=abc&p=146"
+
+
+def to(slot: str) -> str:
+    """The relay URL the client builds — the slot is encodeURIComponent'd."""
+    return f"{icloud.RELAY_PATH}?to={quote(slot, safe='')}"
 
 RECEIPT = {
     "singleFile": {
@@ -66,7 +73,7 @@ def test_relay_does_not_exist_until_configured():
     # never meant to run. This is what keeps a public repo from shipping an
     # open byte relay to anyone who deploys it.
     with patch.multiple(icloud, ICLOUD_RELAY_ENABLED=False, ICLOUD_RELAY_ORIGINS=[]):
-        assert client.post(f"{icloud.RELAY_PATH}?to={SLOT}", content=b"data", headers={"Origin": ORIGIN}).status_code == 404
+        assert client.post(to(SLOT), content=b"data", headers={"Origin": ORIGIN}).status_code == 404
         assert client.options(icloud.RELAY_PATH, headers={"Origin": ORIGIN}).status_code == 404
         assert client.get(icloud.STATUS_PATH).json() == {"enabled": False}
 
@@ -81,9 +88,16 @@ def test_status_reports_enabled_without_naming_origins():
 # ---------------------------------------------------------------------------
 
 
-def test_accepts_a_real_slot_url():
+def test_accepts_both_live_content_host_forms():
+    # cws.icloud-content.com is what the web-services token issues today; the
+    # p<N>-contentws.icloud.com form is what the docs and older probes showed.
     assert icloud.upload_target(SLOT) == SLOT
-    assert icloud.upload_target("https://p1-contentws.icloud.com/x/singleFileUpload").endswith("singleFileUpload")
+    assert icloud.upload_target(
+        "https://p1-contentws.icloud.com/x/singleFileUpload"
+    ).endswith("singleFileUpload")
+    assert icloud.upload_target(
+        "https://p146-contentws.icloud.com/x/singleFileUpload"
+    ).endswith("singleFileUpload")
 
 
 @pytest.mark.parametrize(
@@ -94,10 +108,13 @@ def test_accepts_a_real_slot_url():
         "http://p42-contentws.icloud.com/abc/singleFileUpload",
         # Not Apple at all.
         "https://evil.example/singleFileUpload",
-        # A lookalike that *contains* the real host: this is why the pattern is
-        # anchored at both ends.
+        # Lookalikes that *contain* or *resemble* the real host: this is why the
+        # pattern is anchored at both ends and demands a real label before the
+        # Apple suffix.
         "https://p42-contentws.icloud.com.evil.example/singleFileUpload",
         "https://evil.example/p42-contentws.icloud.com/singleFileUpload",
+        "https://cws.icloud-content.com.evil.example/singleFileUpload",
+        "https://evilicloud-content.com/singleFileUpload",
         # Apple, but not the content host.
         "https://api.apple-cloudkit.com/database/1/x/development/private/records/modify",
         # The content host, but not an upload.
@@ -134,9 +151,9 @@ def test_preflight_answers_an_allowlisted_origin_by_name():
 def test_refuses_an_origin_it_was_not_told_about():
     with _enabled():
         assert client.options(icloud.RELAY_PATH, headers={"Origin": OTHER_ORIGIN}).status_code == 403
-        assert client.post(f"{icloud.RELAY_PATH}?to={SLOT}", content=b"data", headers={"Origin": OTHER_ORIGIN}).status_code == 403
+        assert client.post(to(SLOT), content=b"data", headers={"Origin": OTHER_ORIGIN}).status_code == 403
         # No Origin at all is not a browser, and the relay exists for browsers.
-        assert client.post(f"{icloud.RELAY_PATH}?to={SLOT}", content=b"data").status_code == 403
+        assert client.post(to(SLOT), content=b"data").status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +166,7 @@ def test_relays_the_bytes_and_returns_apples_answer_verbatim():
 
     with _enabled(), upstream:
         response = client.post(
-            f"{icloud.RELAY_PATH}?to={SLOT}",
+            to(SLOT),
             content=b"book",
             headers={"Origin": ORIGIN, "Content-Type": "application/epub+zip"},
         )
@@ -172,7 +189,7 @@ def test_passes_an_upstream_refusal_through_unchanged():
     upstream, _ = _upstream(403, {"error": "expired"})
 
     with _enabled(), upstream:
-        response = client.post(f"{icloud.RELAY_PATH}?to={SLOT}", content=b"book", headers={"Origin": ORIGIN})
+        response = client.post(to(SLOT), content=b"book", headers={"Origin": ORIGIN})
 
     # Apple's verdict is Apple's; this service has no opinion to add.
     assert response.status_code == 403
@@ -184,7 +201,7 @@ def test_refuses_a_chunk_over_the_ceiling_before_sending_anything():
     upstream, post = _upstream()
 
     with _enabled(), upstream, patch.object(icloud, "ICLOUD_RELAY_MAX_BYTES", 4):
-        response = client.post(f"{icloud.RELAY_PATH}?to={SLOT}", content=b"12345", headers={"Origin": ORIGIN})
+        response = client.post(to(SLOT), content=b"12345", headers={"Origin": ORIGIN})
 
     assert response.status_code == 413
     # Refused here, not at Apple: an oversized body must never leave a
@@ -196,7 +213,7 @@ def test_refuses_an_empty_chunk():
     upstream, post = _upstream()
 
     with _enabled(), upstream:
-        response = client.post(f"{icloud.RELAY_PATH}?to={SLOT}", content=b"", headers={"Origin": ORIGIN})
+        response = client.post(to(SLOT), content=b"", headers={"Origin": ORIGIN})
 
     assert response.status_code == 400
     post.assert_not_awaited()
@@ -210,7 +227,7 @@ def test_a_dead_upstream_is_a_502_not_a_traceback():
     fake_client.__aexit__ = AsyncMock(return_value=False)
 
     with _enabled(), patch.object(icloud.httpx, "AsyncClient", return_value=fake_client):
-        response = client.post(f"{icloud.RELAY_PATH}?to={SLOT}", content=b"book", headers={"Origin": ORIGIN})
+        response = client.post(to(SLOT), content=b"book", headers={"Origin": ORIGIN})
 
     assert response.status_code == 502
 
@@ -220,10 +237,35 @@ def test_a_bad_destination_is_refused_before_the_body_is_read():
 
     with _enabled(), upstream:
         response = client.post(
-            f"{icloud.RELAY_PATH}?to=https://evil.example/singleFileUpload",
+            to("https://evil.example/singleFileUpload"),
             content=b"book",
             headers={"Origin": ORIGIN},
         )
 
     assert response.status_code == 400
     post.assert_not_awaited()
+
+
+def test_a_refusal_to_an_allowed_origin_still_carries_cors():
+    # The bug the live test caught: a 400 with no Access-Control-Allow-Origin
+    # reaches the browser as an opaque "blocked by CORS", so the reader app
+    # cannot tell a rejected target from a dead network. Every response after
+    # the origin check must be readable by an allowed caller.
+    upstream, _ = _upstream()
+
+    with _enabled(), upstream:
+        bad_target = client.post(
+            to("https://evil.example/singleFileUpload"),
+            content=b"book",
+            headers={"Origin": ORIGIN},
+        )
+        oversized = None
+        with patch.object(icloud, "ICLOUD_RELAY_MAX_BYTES", 2):
+            oversized = client.post(
+                to(SLOT), content=b"toolong", headers={"Origin": ORIGIN}
+            )
+
+    assert bad_target.status_code == 400
+    assert bad_target.headers["access-control-allow-origin"] == ORIGIN
+    assert oversized.status_code == 413
+    assert oversized.headers["access-control-allow-origin"] == ORIGIN

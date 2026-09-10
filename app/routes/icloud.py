@@ -45,10 +45,15 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
-# Apple's content-web-services hosts, which is where every signed upload slot
-# lives. Anchored at both ends: a pattern that merely *contained* this would
-# match "p1-contentws.icloud.com.example.org" and relay to anywhere.
-_APPLE_CONTENT_HOST = re.compile(r"^p\d+-contentws\.icloud\.com$")
+# Apple's content hosts, which is where every signed upload slot lives. Two
+# live forms, both observed: `cws.icloud-content.com` (what the web-services
+# token issues today) and `p<N>-contentws.icloud.com` (the form the docs and
+# older probes showed). Anchored at both ends and requiring a real label before
+# the Apple suffix, so neither `cws.icloud-content.com.evil.example` nor
+# `evilicloud-content.com` can match and turn this into an open relay.
+_APPLE_CONTENT_HOST = re.compile(
+    r"^(p\d+-contentws\.icloud\.com|[a-z0-9-]+\.icloud-content\.com)$"
+)
 
 RELAY_PATH = "/icloud/asset"
 STATUS_PATH = "/icloud/relay-status"
@@ -189,9 +194,21 @@ async def relay_asset(
     """
     _require_enabled()
 
+    # Origin first: a caller this relay does not answer gets a 403 with no CORS
+    # headers, which is correct — it is not an allowed origin. Every response
+    # *after* this point carries CORS, so an allowed caller can read even a
+    # refusal. Without that, a 400 (bad target, oversized) reaches the browser
+    # as an opaque "blocked by CORS" and the reader app cannot tell a rejected
+    # target from a dead network.
     origin = _allowed_origin(request)
-    target = upload_target(to)
-    body = await _capped_body(request)
+
+    try:
+        target = upload_target(to)
+        body = await _capped_body(request)
+    except HTTPException as refused:
+        return JSONResponse(
+            {"detail": refused.detail}, status_code=refused.status_code, headers=_cors(origin)
+        )
 
     try:
         async with httpx.AsyncClient(timeout=ICLOUD_RELAY_TIMEOUT) as client:
@@ -204,7 +221,9 @@ async def relay_asset(
         # The chunk's size is worth knowing when this goes wrong; its contents
         # never are.
         logger.warning("icloud relay: upstream failed (%d bytes): %s", len(body), exc)
-        raise HTTPException(status_code=502, detail="iCloud did not answer") from None
+        return JSONResponse(
+            {"detail": "iCloud did not answer"}, status_code=502, headers=_cors(origin)
+        )
 
     logger.info("icloud relay: %d bytes -> %s", len(body), upstream.status_code)
 
