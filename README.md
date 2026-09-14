@@ -137,7 +137,7 @@ would mean expensive per-mode Solr queries have been re-introduced).
 make test-e2e
 
 # Or test against any running instance:
-make test-e2e BASE_URL=https://opds.openlibrary.org
+make test-e2e BASE_URL=https://openlibrary.org/opds
 
 # Or run the service and tests separately:
 make serve                              # terminal 1

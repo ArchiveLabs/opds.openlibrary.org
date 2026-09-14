@@ -37,6 +37,33 @@ CACHE_ENABLED: bool = os.environ.get("CACHE_ENABLED", "true").lower() == "true"
 # nginx sits in front. See docs/testing-opds-locally.md.
 CORS_ENABLED: bool = os.environ.get("CORS_ENABLED", "false").lower() == "true"
 
+# --- iCloud asset relay -----------------------------------------------------
+#
+# A byte relay for one thing: the reader app putting a book into a reader's own
+# iCloud from a *browser*. CloudKit's web-services asset upload POSTs to a
+# signed URL on ``p<N>-contentws.icloud.com``, and that host answers no
+# ``Access-Control-Allow-Origin`` — measured — so a browser can never read the
+# upload receipt and the write cannot complete. Native shells have no such
+# problem: their requests do not come from a browser at all.
+#
+# **Off unless ``ICLOUD_RELAY_ORIGINS`` is set**, and that is deliberate in a
+# public repo: an unconfigured deployment 404s the route rather than offering
+# anyone who runs this service an open byte relay. Comma-separated exact
+# origins, e.g. "https://reader.archive.org,https://localhost:4173".
+ICLOUD_RELAY_ORIGINS: list[str] = [
+    origin.strip()
+    for origin in os.environ.get("ICLOUD_RELAY_ORIGINS", "").split(",")
+    if origin.strip()
+]
+ICLOUD_RELAY_ENABLED: bool = bool(ICLOUD_RELAY_ORIGINS)
+
+# Apple's own ceiling for a web-services asset. The reader cuts files into 14 MB
+# chunks, so a book of any size arrives as several requests, each under this.
+ICLOUD_RELAY_MAX_BYTES: int = 15 * 1024 * 1024
+
+# Generous: a 14 MB body on its way to Apple over somebody's home upload.
+ICLOUD_RELAY_TIMEOUT: float = float(os.environ.get("ICLOUD_RELAY_TIMEOUT", "180.0"))
+
 SENTRY_DSN: str | None = os.environ.get(
     "SENTRY_DSN",
     "https://8d8cab445edc9b4e452ba06d0be46dcb@sentry.archive.org/73",

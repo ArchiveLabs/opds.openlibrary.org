@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from app.cache import get_cache, LANG_OPTIONS_KEY, TTL_LANG_OPTIONS_SECONDS
 from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
 from app.logger import get_logger
+from app.routes.icloud import router as icloud_router
 from app.routes.opds import router as opds_router
 from app.sentry import init_sentry
 from app.config import CORS_ENABLED, ENVIRONMENT
@@ -129,3 +130,5 @@ def sentry_debug():
 
 
 app.include_router(opds_router)
+# 404s every route unless ICLOUD_RELAY_ORIGINS is configured — see app/routes/icloud.py.
+app.include_router(icloud_router)
