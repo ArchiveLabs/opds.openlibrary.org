@@ -494,6 +494,39 @@ class TestOpdsBooks:
             resp = client.get("/books/OL58393454M")
         assert resp.status_code == 404
 
+    def test_cover_link_reports_served_dimensions(self):
+        """Cover links carry the pixel size of the linked ``-L.jpg`` so clients
+        can size skeleton loaders before the image arrives.  Solr reports the
+        443x685 original; the covers server scales ``-L`` to fit 500x500, so
+        the link must say 323x500.  Drives the real provider so a regression in
+        the pinned pyopds2_openlibrary shows up here."""
+        doc = {
+            "key": "/works/OL82536W",
+            "title": "Harry Potter and the Prisoner of Azkaban",
+            "ebook_access": "public",
+            "editions": {"numFound": 1, "start": 0, "numFoundExact": True,
+                         "docs": [{"key": "/books/OL39432403M",
+                                   "title": "Harry Potter and the Prisoner of Azkaban",
+                                   "ebook_access": "public",
+                                   "cover_i": 10580435,
+                                   "cover_width": 443,
+                                   "cover_height": 685,
+                                   "providers": [{"provider_name": "ia",
+                                                  "format": "epub",
+                                                  "access": "open-access",
+                                                  "url": "https://archive.org/download/x/x.epub"}]}]},
+        }
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {"docs": [doc], "numFound": 1}
+            resp = client.get("/books/OL39432403M")
+        assert resp.status_code == 200
+        (cover,) = resp.json()["images"]
+        assert cover["href"] == "https://covers.openlibrary.org/b/id/10580435-L.jpg"
+        assert (cover["width"], cover["height"]) == (323, 500)
+        # The dimensions are not in OL's default field set; the provider must ask.
+        requested = [c.kwargs.get("params", {}).get("fields", "") for c in mock_get.call_args_list]
+        assert any("cover_width" in f and "cover_height" in f for f in requested)
+
     def test_self_link_uses_opds_base(self):
         from pyopds2_openlibrary import OpenLibraryDataProvider as OLP
         record = _make_record(edition_key="OL55M")
