@@ -1936,3 +1936,89 @@ class TestRateLimitSentryCapture:
             client.get("/search?query=test")
         mock_capture.assert_called_once()
         mock_scope.set_extra.assert_any_call("retry_after", "unknown")
+
+
+# ---------------------------------------------------------------------------
+# language as a list: language=en,fr
+# ---------------------------------------------------------------------------
+
+class TestLanguageList:
+    """The reader sends the languages it reads in, primary first; the feed
+    canonicalises the spelling once and carries the list through every link."""
+
+    @staticmethod
+    def _seed_language_map():
+        import pyopds2_openlibrary as m
+        m._languages_map_cache = {"eng": "en", "fre": "fr", "ger": "de"}
+        m._languages_names_cache = {"en": "English", "fr": "French", "de": "German"}
+        m._languages_map_fetched_at = 9e18
+        m._iso_to_marc_cache.clear()
+        m._iso_to_marc_cache.update({"en": "eng", "fr": "fre", "de": "ger"})
+
+    def test_home_hands_the_provider_the_canonical_list(self, mock_empty_search):
+        client.get("/?language=EN,%20fr")
+        assert all(call.kwargs["language"] == "en,fr" for call in mock_empty_search.call_args_list)
+
+    def test_home_without_english_relaxes_the_groups(self, mock_empty_search):
+        client.get("/?language=fr,de")
+        assert all(call.kwargs["require_cover"] is False for call in mock_empty_search.call_args_list)
+        assert all(call.kwargs["limit"] == 50 for call in mock_empty_search.call_args_list)
+
+    def test_home_with_english_keeps_the_english_rules(self, mock_empty_search):
+        client.get("/?language=en,fr")
+        assert all(call.kwargs["require_cover"] is True for call in mock_empty_search.call_args_list)
+        assert all(call.kwargs["limit"] == 25 for call in mock_empty_search.call_args_list)
+
+    def test_search_hands_the_list_to_the_search_and_the_facets(self, mock_empty_search):
+        with patch(BUILD_FACETS_PATCH_TARGET, create=True, return_value=[]) as build_facets:
+            client.get("/search?query=x&language=EN,%20fr&mode=ebooks")
+        assert mock_empty_search.call_args.kwargs["language"] == "en,fr"
+        assert build_facets.call_args.kwargs["language"] == "en,fr"
+
+    def test_search_pagination_keeps_every_filter(self):
+        # pyopds2's own params know only query, limit, page and sort;
+        # following ``next`` used to drop the rest.
+        self._seed_language_map()
+        with patch("pyopds2_openlibrary._get") as mock_get:
+            mock_get.return_value.json.return_value = {
+                "numFound": 100,
+                "docs": [_make_record().model_dump()],
+            }
+            data = client.get(
+                "/search?query=x&language=en,fr&mode=ebooks&media_type=ebook"
+                "&access=print_disabled&limit=10&page=2"
+            ).json()
+        by_rel = {l["rel"]: unquote_plus(l["href"]) for l in data["links"] if isinstance(l.get("rel"), str)}
+        for rel in ("first", "previous", "next", "last"):
+            assert "language=en,fr" in by_rel[rel], rel
+            assert "mode=ebooks" in by_rel[rel], rel
+            assert "media_type=ebook" in by_rel[rel], rel
+            assert "access=print_disabled" in by_rel[rel], rel
+        assert "language:(eng OR fre)" in mock_get.call_args.kwargs["params"]["q"]
+        assert mock_get.call_args.kwargs["params"]["lang"] == "en"
+
+    def test_home_cache_key_is_the_same_for_every_spelling(self, mock_empty_search):
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/?language=en,fr")
+        client.get("/?language=EN,%20fr")
+        client.get("/?language=fr,en")
+        keys = [k for k, _ in rec.cached_calls if k.startswith("opds:home:")]
+        assert len(keys) == 3
+        assert keys[0] == keys[1]
+        assert keys[2] != keys[0]
+
+    def test_author_links_carry_the_list(self, mock_single_record):
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)):
+            data = client.get("/authors/OL1234A?language=en,fr&page=2").json()
+        by_rel = {l["rel"]: unquote_plus(l["href"]) for l in data["links"] if isinstance(l.get("rel"), str)}
+        for rel in ("self", "first", "previous"):
+            assert "language=en,fr" in by_rel[rel], rel
+
+    def test_search_template_takes_the_languages(self, mock_empty_search):
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)):
+            for path in ("/search?query=x", "/authors/OL1234A"):
+                data = client.get(path).json()
+                search = next(l for l in data["links"] if l.get("rel") == "search")
+                assert search["href"].endswith("/search{?query,language}"), path
+                assert search["templated"] is True, path

@@ -29,6 +29,20 @@ scripts/
 
 Interactive docs: `/docs` (Swagger UI) · `/redoc`
 
+| Route | Parameters |
+|---|---|
+| `GET /` | `mode`, `language`, `page`, `media_type`, `access`, `limit` |
+| `GET /search` | `query`, `limit`, `page`, `sort`, `mode`, `title`, `language`, `media_type`, `access` |
+| `GET /authors/{olid}` | `page`, `limit`, `mode`, `language`, `media_type`, `access` |
+| `GET /books/{olid}` | none |
+
+`language` is a comma-separated list of ISO 639-1 codes, the reader's
+preferred language first: `language=en,fr` keeps works in either language
+and prefers English editions. A code Open Library does not know is ignored;
+with none left, no language filter applies. Every link the feed emits carries
+the list as given, and the `rel="search"` template is
+`/search{?query,language}` so a client can fill its languages in.
+
 ---
 
 ## Prerequisites

@@ -33,6 +33,8 @@ matches nothing.
 - **Allowed methods**: GET, HEAD, OPTIONS — and **POST on `/icloud/asset` only**. Every other route is GET.
 - **iCloud asset relay**: `/icloud/asset` answers 404 unless `ICLOUD_RELAY_ORIGINS` is configured, so an unconfigured deployment needs neither row. Where it is configured the WAF must pass POST bodies up to 15 MB (Apple's asset ceiling; the app refuses larger itself) and the `to` query parameter, which is a full `https://p<N>-contentws.icloud.com/…/singleFileUpload` URL — the app validates that host and refuses anything else, so the WAF need not
 - **Homepage query params**: `/` takes `mode`, `language`, `page`, `media_type`, `access` and `limit`, and the feed itself links to `/?language=…`, `/?access=…` and `/?page=…` — a homepage pattern without `(\?.*)?` blocks the service's own facet and pagination links
+- **`language` is a list**: `language=en,fr,de` (URL-encoded `en%2Cfr%2Cde`), comma-separated ISO 639-1 codes, on `/`, `/search` and `/authors/{olid}` — the WAF must not treat the commas as anything
+- **Author query params**: `/authors/{olid}` takes `page`, `limit`, `mode`, `language`, `media_type` and `access`
 - **Search query params**: `/search` query parameters contain Solr syntax (`[]`, `*`, `:`, spaces) — the WAF must not block these as injection attempts
 - **Docs endpoints**: `/docs`, `/redoc`, `/openapi.json` are disabled unconditionally in the `FastAPI(...)` constructor; block them at the WAF as well
 - **Sentry debug**: `/sentry-debug` is always registered but answers 404 when `ENVIRONMENT == "production"` — block in production WAF rules
