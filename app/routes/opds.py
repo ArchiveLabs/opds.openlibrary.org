@@ -20,6 +20,15 @@ try:
 except ImportError:  # an older pyopds2_openlibrary: one code, passed through as is
     def canonical_language(raw: Optional[str]) -> Optional[str]:
         return raw or None
+
+try:
+    from pyopds2_openlibrary import canonical_media_type, canonical_mode
+except ImportError:  # an older pyopds2_openlibrary: one value, passed through as is
+    def canonical_mode(raw: Optional[str]) -> str:
+        return raw or "everything"
+
+    def canonical_media_type(raw: Optional[str]) -> Optional[str]:
+        return raw or None
 from app.cache import (
     CacheBackend,
     LANG_OPTIONS_KEY,
@@ -69,7 +78,7 @@ def _base_url(request: Request) -> str:
 def _common_links(base: str) -> list[Link]:
     """Links shared across catalog responses (search template, shelf, profile)."""
     return [
-        Link(rel="search", href=f"{base}/search{{?query,language}}", type=OPDS_MEDIA_TYPE, templated=True),
+        Link(rel="search", href=f"{base}/search{{?query,language,mode,media_type}}", type=OPDS_MEDIA_TYPE, templated=True),
         Link(rel="http://opds-spec.org/shelf",
              href="https://archive.org/services/loans/loan/?action=user_bookshelf",
              type=OPDS_MEDIA_TYPE),
@@ -204,10 +213,10 @@ except ImportError:
 @router.get("/", summary="OPDS 2.0 homepage")
 async def opds_home(
     request: Request,
-    mode: str = Query(default="everything", description="Availability filter: everything, ebooks, open_access, buyable"),
+    mode: str = Query(default="everything", description="Availability filter: everything, or a comma-separated list of ebooks, open_access, buyable, print_disabled (any of them)."),
     language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
     page: int = Query(default=1, ge=1, description="Group page (each page loads a batch of carousels)"),
-    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook. Omit for all."),
+    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
     limit: int = Query(default=0, ge=0, le=100, description="Per-carousel publication count (0 = language default: 25 EN / 100 non-EN)."),
     cache: CacheBackend = Depends(get_cache),
@@ -215,8 +224,10 @@ async def opds_home(
     logger.info("GET / client=%s language=%s page=%s media_type=%s access=%s limit=%s", request.client, language, page, media_type, access, limit)
     base = _base_url(request)
     provider = get_provider(base)
-    # One spelling of the list, so the cache key and every href agree.
+    # One spelling of each list, so the cache key and every href agree.
     language = canonical_language(language)
+    mode = canonical_mode(mode)
+    media_type = canonical_media_type(media_type)
 
     is_default = mode == "everything" and language is None and page == 1 and media_type is None and access is None
     ttl = TTL_HOME_DEFAULT_SECONDS if is_default else TTL_HOME_NONDEFAULT_SECONDS
@@ -275,10 +286,10 @@ async def opds_search(
     limit: int = Query(default=25, ge=1, le=100),
     page: int = Query(default=1, ge=1),
     sort: Optional[str] = Query(default=None),
-    mode: str = Query(default="everything", description="Search mode, e.g. 'ebooks' or 'everything'"),
+    mode: str = Query(default="everything", description="Availability filter: everything, or a comma-separated list of ebooks, open_access, buyable, print_disabled (any of them)."),
     title: Optional[str] = Query(default=None, description="Display title for the results page"),
     language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
-    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook. Omit for all."),
+    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
     cache: CacheBackend = Depends(get_cache),
 ):
@@ -286,6 +297,8 @@ async def opds_search(
     base = _base_url(request)
     provider = get_provider(base)
     language = canonical_language(language)
+    mode = canonical_mode(mode)
+    media_type = canonical_media_type(media_type)
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
 
     async def _fetch_search():
@@ -374,7 +387,7 @@ async def opds_authors(
     limit: int = Query(default=25, ge=1, le=100),
     mode: str = Query(default="everything"),
     language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
-    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook. Omit for all."),
+    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
     cache: CacheBackend = Depends(get_cache),
 ):
@@ -382,6 +395,8 @@ async def opds_authors(
     base = _base_url(request)
     provider = get_provider(base)
     language = canonical_language(language)
+    mode = canonical_mode(mode)
+    media_type = canonical_media_type(media_type)
 
     bio_key = make_key("author_bio", {"olid": olid})
     catalog_key = make_key("author_catalog", {

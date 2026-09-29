@@ -631,9 +631,9 @@ def _fake_facets(base_url="", query="test", sort=None, mode="everything", langua
 
     avail_links = [
         _avail_link("everything",  "Everything",            f"{base_url}/search?query={query}"),
-        _avail_link("ebooks",      "Available to Borrow",   f"{base_url}/search?query={query}&mode=ebooks"),
-        _avail_link("open_access", "Open Access",           f"{base_url}/search?query={query}&mode=open_access"),
-        _avail_link("buyable",     "Available for Purchase", f"{base_url}/search?query={query}&mode=buyable"),
+        _avail_link("ebooks",      "Borrow",   f"{base_url}/search?query={query}&mode=ebooks"),
+        _avail_link("open_access", "Free",           f"{base_url}/search?query={query}&mode=open_access"),
+        _avail_link("buyable",     "Buy", f"{base_url}/search?query={query}&mode=buyable"),
     ]
     access_links = [
         _access_link("general",        "General",       f"{base_url}/search?query={query}"),
@@ -672,7 +672,7 @@ class TestFacets:
     def test_active_availability_facet_has_self_rel(self, mock_empty_search):
         data = client.get("/search?query=test&mode=ebooks").json()
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
-        ebooks_link = next(l for l in avail["links"] if l["title"] == "Available to Borrow")
+        ebooks_link = next(l for l in avail["links"] if l["title"] == "Borrow")
         assert ebooks_link["rel"] == "self"
 
     def test_availability_labels_match_canonical(self, mock_empty_search):
@@ -680,9 +680,9 @@ class TestFacets:
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
         titles = {l["title"] for l in avail["links"]}
         assert "Everything" in titles
-        assert "Available to Borrow" in titles
-        assert "Open Access" in titles
-        assert "Available for Purchase" in titles
+        assert "Borrow" in titles
+        assert "Free" in titles
+        assert "Buy" in titles
         assert "Print Disabled" not in titles
 
     def test_access_facet_present(self, mock_empty_search):
@@ -1029,7 +1029,7 @@ class TestOpdsAuthors:
             data = client.get("/authors/OL1234A").json()
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
         titles = {l["title"] for l in avail["links"]}
-        assert "Available for Purchase" not in titles
+        assert "Buy" not in titles
 
     def test_author_active_mode_marked_with_self_rel(self):
         record = _make_record()
@@ -1037,7 +1037,7 @@ class TestOpdsAuthors:
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A?mode=ebooks").json()
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
-        ebooks_link = next(l for l in avail["links"] if l["title"] == "Available to Borrow")
+        ebooks_link = next(l for l in avail["links"] if l["title"] == "Borrow")
         assert ebooks_link.get("rel") == "self"
 
     def test_author_media_type_filter_forwarded(self):
@@ -2020,5 +2020,30 @@ class TestLanguageList:
             for path in ("/search?query=x", "/authors/OL1234A"):
                 data = client.get(path).json()
                 search = next(l for l in data["links"] if l.get("rel") == "search")
-                assert search["href"].endswith("/search{?query,language}"), path
+                assert search["href"].endswith("/search{?query,language,mode,media_type}"), path
                 assert search["templated"] is True, path
+
+
+# ---------------------------------------------------------------------------
+# mode and media_type as lists: mode=ebooks,open_access
+# ---------------------------------------------------------------------------
+
+class TestFacetLists:
+    """The reader renders Availability and Media Type as checkboxes; the feed
+    takes the ticked values as a list, one spelling of it everywhere."""
+
+    def test_search_hands_the_canonical_lists_on(self, mock_empty_search):
+        with patch(BUILD_FACETS_PATCH_TARGET, create=True, return_value=[]) as build_facets:
+            client.get("/search?query=x&mode=open_access,%20EBOOKS&media_type=audiobook,ebook")
+        assert mock_empty_search.call_args.kwargs["facets"] == {"mode": "open_access,ebooks"}
+        assert mock_empty_search.call_args.kwargs["media_type"] == "ebook,audiobook"
+        assert build_facets.call_args.kwargs["mode"] == "open_access,ebooks"
+
+    def test_home_cache_key_is_the_same_for_every_spelling(self, mock_empty_search):
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/?mode=ebooks,open_access")
+        client.get("/?mode=open_access,ebooks")
+        keys = [k for k, _ in rec.cached_calls if k.startswith("opds:home:")]
+        assert len(keys) == 2
+        assert keys[0] == keys[1]
