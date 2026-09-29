@@ -632,7 +632,7 @@ def _fake_facets(base_url="", query="test", sort=None, mode="everything", langua
     avail_links = [
         _avail_link("everything",  "Everything",            f"{base_url}/search?query={query}"),
         _avail_link("ebooks",      "Borrow",   f"{base_url}/search?query={query}&mode=ebooks"),
-        _avail_link("open_access", "Free",           f"{base_url}/search?query={query}&mode=open_access"),
+        _avail_link("open_access", "Open Access",    f"{base_url}/search?query={query}&mode=open_access"),
         _avail_link("buyable",     "Buy", f"{base_url}/search?query={query}&mode=buyable"),
     ]
     access_links = [
@@ -681,7 +681,7 @@ class TestFacets:
         titles = {l["title"] for l in avail["links"]}
         assert "Everything" in titles
         assert "Borrow" in titles
-        assert "Free" in titles
+        assert "Open Access" in titles
         assert "Buy" in titles
         assert "Print Disabled" not in titles
 
