@@ -35,6 +35,7 @@ Interactive docs: `/docs` (Swagger UI) · `/redoc`
 | `GET /search` | `query`, `limit`, `page`, `sort`, `mode`, `title`, `language`, `media_type`, `access` |
 | `GET /authors/{olid}` | `page`, `limit`, `mode`, `language`, `media_type`, `access` |
 | `GET /books/{olid}` | none |
+| `GET /rel/{relation}` | none: the HTML page a link relation the feed coins resolves to |
 
 `language` is a comma-separated list of ISO 639-1 codes, the reader's
 preferred language first: `language=en,fr` keeps works in either language
@@ -42,6 +43,27 @@ and prefers English editions. A code Open Library does not know is ignored;
 with none left, no language filter applies. Every link the feed emits carries
 the list as given, and the `rel="search"` template is
 `/search{?query,language}` so a client can fill its languages in.
+
+### Link relations
+
+Every link says what kind of link it is through its `rel`, one relation or
+a list of them, so a client selects by relation rather than by title. Every
+option link of a facet group carries the group's relation, the applied
+option as `["self", <relation>]`:
+
+| Facet group | Relation on each option link |
+|---|---|
+| Availability | `https://openlibrary.org/opds/rel/facet/availability` |
+| Language | `https://openlibrary.org/opds/rel/facet/language` |
+| Media Type | `https://openlibrary.org/opds/rel/facet/media-type` |
+| Access | `https://openlibrary.org/opds/rel/facet/access` |
+
+The Trending Books carousel's `self` link also carries the registered
+`http://opds-spec.org/sort/popular`. The feed's own relations are extension
+relations (RFC 8288): fixed strings, the same on every deployment, that
+resolve to [app/docs/link-relations.md](app/docs/link-relations.md), served
+at `/rel/…`. Check a `rel` for membership, not equality: `has_rel` in
+pyopds2 reads a string or a list.
 
 ---
 

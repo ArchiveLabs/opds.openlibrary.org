@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app as fastapi_app
 from app.cache import NullCacheBackend, get_cache
+from pyopds2 import has_rel
 from pyopds2_openlibrary import OpenLibraryDataProvider
 from app.routes import opds as opds_module
 
@@ -24,6 +25,8 @@ from app.routes import opds as opds_module
 # implementation without manual unpatching.
 _REAL_FETCH_LANG_COUNTS = OpenLibraryDataProvider.fetch_language_counts
 _REAL_FETCH_FACET_COUNTS = OpenLibraryDataProvider.fetch_facet_counts
+_REAL_BUILD_FACETS = OpenLibraryDataProvider.build_facets
+_REAL_BUILD_HOME_FACETS = OpenLibraryDataProvider.build_home_facets
 
 app = fastapi_app
 
@@ -1038,7 +1041,7 @@ class TestOpdsAuthors:
             data = client.get("/authors/OL1234A?mode=ebooks").json()
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
         ebooks_link = next(l for l in avail["links"] if l["title"] == "Borrow")
-        assert ebooks_link.get("rel") == "self"
+        assert has_rel(ebooks_link, "self")
 
     def test_author_media_type_filter_forwarded(self):
         record = _make_record()
@@ -1591,7 +1594,7 @@ class TestLanguageFacetCounts:
         )
         fr = next((l for l in links if l["title"] == "French"), None)
         assert fr is not None
-        assert fr.get("rel") == "self"
+        assert has_rel(fr, "self")
 
     def test_fetch_language_counts_parses_languages_endpoint(self):
         self._seed_language_map()
@@ -2047,3 +2050,107 @@ class TestFacetLists:
         keys = [k for k, _ in rec.cached_calls if k.startswith("opds:home:")]
         assert len(keys) == 2
         assert keys[0] == keys[1]
+
+
+# ---------------------------------------------------------------------------
+# Link relations
+# ---------------------------------------------------------------------------
+
+FACET_RELS = {
+    "Availability": "https://openlibrary.org/opds/rel/facet/availability",
+    "Language": "https://openlibrary.org/opds/rel/facet/language",
+    "Media Type": "https://openlibrary.org/opds/rel/facet/media-type",
+    "Access": "https://openlibrary.org/opds/rel/facet/access",
+}
+REL_SORT_POPULAR = "http://opds-spec.org/sort/popular"
+
+
+def _assert_facet_rels(facets):
+    """Every option link carries its group's relation; the applied one
+    ``["self", <relation>]``; nothing carries another group's."""
+    assert [g["metadata"]["title"] for g in facets] == list(FACET_RELS)
+    for group in facets:
+        rel = FACET_RELS[group["metadata"]["title"]]
+        for link in group["links"]:
+            rels = link["rel"] if isinstance(link["rel"], list) else [link["rel"]]
+            assert [r for r in rels if r != "self"] == [rel], link
+        applied = [l for l in group["links"] if has_rel(l, "self")]
+        assert len(applied) == 1, group["metadata"]["title"]
+        assert applied[0]["rel"] == ["self", rel]
+
+
+class TestLinkRels:
+    """The relations the feed emits so a client selects by kind, not title."""
+
+    def test_search_facet_links_carry_their_group_rel(self, mock_empty_search):
+        with patch(BUILD_FACETS_PATCH_TARGET, _REAL_BUILD_FACETS):
+            data = client.get("/search?query=test&mode=ebooks&access=print_disabled").json()
+        _assert_facet_rels(data["facets"])
+
+    def test_home_facet_links_carry_their_group_rel(self, mock_single_record):
+        with patch(BUILD_HOME_FACETS_PATCH_TARGET, _REAL_BUILD_HOME_FACETS):
+            data = client.get("/?media_type=audiobook").json()
+        _assert_facet_rels(data["facets"])
+
+    def test_author_facet_links_carry_their_group_rel(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A?mode=ebooks").json()
+        _assert_facet_rels(data["facets"])
+
+    def test_the_rels_do_not_follow_the_base_url(self, mock_empty_search):
+        with patch(BUILD_FACETS_PATCH_TARGET, _REAL_BUILD_FACETS), \
+             patch("app.routes.opds.OPDS_BASE_URL", "http://localhost:8090"):
+            data = client.get("/search?query=test").json()
+        self_link = next(l for l in data["links"] if has_rel(l, "self"))
+        assert self_link["href"].startswith("http://localhost:8090/")
+        _assert_facet_rels(data["facets"])
+
+    def test_only_the_trending_carousel_carries_sort_popular(self, mock_single_record):
+        data = client.get("/").json()
+        groups = data["groups"]
+        assert groups, "no carousels"
+        trending = [g for g in groups if g["metadata"]["title"] == "Trending Books"]
+        assert len(trending) == 1
+        for group in groups:
+            self_link = next(l for l in group["links"] if has_rel(l, "self"))
+            if group is trending[0]:
+                assert self_link["rel"] == ["self", REL_SORT_POPULAR]
+            else:
+                assert self_link["rel"] == "self", group["metadata"]["title"]
+
+    def test_the_trending_rel_is_the_registered_one(self):
+        assert REL_SORT_POPULAR == "http://opds-spec.org/sort/popular"
+
+
+class TestRelRoute:
+    """The feed's own relations resolve to the page documenting them."""
+
+    def test_each_facet_rel_resolves_to_html(self):
+        for rel in FACET_RELS.values():
+            path = rel.removeprefix("https://openlibrary.org/opds")
+            r = client.get(path)
+            assert r.status_code == 200, rel
+            assert r.headers["content-type"].startswith("text/html")
+            assert rel in r.text
+
+    def test_the_page_anchors_each_relation(self):
+        r = client.get("/rel/facet/media-type")
+        assert 'id="facet-media-type"' in r.text
+        assert 'id="facet-availability"' in r.text
+
+    def test_the_index_lists_them_all(self):
+        for path in ("/rel", "/rel/"):
+            r = client.get(path)
+            assert r.status_code == 200
+            assert all(rel in r.text for rel in FACET_RELS.values())
+
+    def test_a_relation_never_coined_is_404(self):
+        r = client.get("/rel/facet/colour")
+        assert r.status_code == 404
+        assert "colour" in r.json()["detail"]
+        assert client.get("/rel/carousel/trending").status_code == 404
+
+    def test_a_trailing_slash_still_resolves(self):
+        assert client.get("/rel/facet/access/").status_code == 200
