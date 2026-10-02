@@ -33,7 +33,7 @@ Interactive docs: `/docs` (Swagger UI) · `/redoc`
 |---|---|
 | `GET /` | `mode`, `language`, `page`, `media_type`, `access`, `limit` |
 | `GET /search` | `query`, `limit`, `page`, `sort`, `mode`, `title`, `language`, `media_type`, `access` |
-| `GET /authors/{olid}` | `page`, `limit`, `mode`, `language`, `media_type`, `access` |
+| `GET /authors/{olid}` | `page`, `limit`, `mode`, `language`, `media_type`, `access`, `sort` |
 | `GET /books/{olid}` | none |
 | `GET /rel/{relation}` | none: the HTML page a link relation the feed coins resolves to |
 
@@ -58,8 +58,13 @@ option as `["self", <relation>]`:
 | Media Type | `https://openlibrary.org/opds/rel/facet/media-type` |
 | Access | `https://openlibrary.org/opds/rel/facet/access` |
 
-The Trending Books carousel's `self` link also carries the registered
-`http://opds-spec.org/sort/popular`. The feed's own relations are extension
+The Trending Books carousel's `self` link, and the Popular Books
+carousel's on an author page, also carry the registered
+`http://opds-spec.org/sort/popular`. An author page links to the author's
+openlibrary.org page as `alternate`, every book's author contributor links
+to both the HTML page and the author page with `rel` `author`, and the
+author's photo is a feed-level `images` entry carrying
+`https://openlibrary.org/opds/rel/portrait`. The feed's own relations are extension
 relations (RFC 8288): fixed strings, the same on every deployment, that
 resolve to [app/docs/link-relations.md](app/docs/link-relations.md), served
 at `/rel/…`. Check a `rel` for membership, not equality: `has_rel` in

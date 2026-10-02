@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 TTL_HOME_DEFAULT_SECONDS    = 1 * 60
 TTL_HOME_NONDEFAULT_SECONDS = 1 * 60
 TTL_BOOK_SECONDS            = 6 * 60 * 60
-TTL_AUTHOR_BIO_SECONDS      = 24 * 60 * 60
+TTL_AUTHOR_INFO_SECONDS     = 24 * 60 * 60
 TTL_AUTHOR_CATALOG_SECONDS  = 1 * 60 * 60
 TTL_LANG_OPTIONS_SECONDS    = 7 * 24 * 60 * 60   # 7 days
 # Language facet counts (ebook_edition_count per language) come from

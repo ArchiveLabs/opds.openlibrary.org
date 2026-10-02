@@ -263,3 +263,40 @@ def test_author_detail(client: httpx.Client) -> None:
     if r.status_code == 200:
         body = r.json()
         assert "metadata" in body
+
+
+@pytest.mark.e2e
+def test_author_page_has_portrait_bio_and_popular_books(client: httpx.Client) -> None:
+    # Ursula K. Le Guin: photo, bio and well-rated books
+    r = client.get("/authors/OL31353A")
+    assert r.status_code == 200, r.text[:200]
+    body = r.json()
+    assert body["metadata"]["title"] == "Ursula K. Le Guin"
+    assert body["metadata"]["description"]
+    [image] = body["images"]
+    assert image["href"].startswith("https://covers.openlibrary.org/a/id/")
+    assert image["rel"] == "https://openlibrary.org/opds/rel/portrait"
+    assert image["width"] and image["height"]
+    assert any(l["rel"] == "alternate" and l["type"] == "text/html" for l in body["links"])
+    [group] = body["groups"]
+    assert group["publications"]
+    [self_link] = group["links"]
+    assert self_link["rel"] == ["self", "http://opds-spec.org/sort/popular"]
+    assert self_link["href"].endswith("/authors/OL31353A?sort=rating")
+    author = body["publications"][0]["metadata"]["author"][0]
+    assert all(l["rel"] == "author" for l in author["links"])
+
+
+@pytest.mark.e2e
+def test_author_page_sorted_by_rating_has_no_carousel(client: httpx.Client) -> None:
+    r = client.get("/authors/OL31353A?sort=rating")
+    assert r.status_code == 200
+    assert "groups" not in r.json()
+    assert client.get("/authors/OL31353A?sort=bogus").status_code == 422
+
+
+@pytest.mark.e2e
+def test_portrait_relation_resolves(client: httpx.Client) -> None:
+    r = client.get("/rel/portrait")
+    assert r.status_code == 200
+    assert "portrait" in r.text

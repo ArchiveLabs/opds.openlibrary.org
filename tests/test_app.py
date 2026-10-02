@@ -37,7 +37,14 @@ FACET_COUNTS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.fetch_facet
 LANG_COUNTS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.fetch_language_counts"
 BUILD_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_facets"
 BUILD_HOME_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_home_facets"
-FETCH_AUTHOR_BIO_PATCH_TARGET = "app.routes.opds.fetch_author_bio"
+FETCH_AUTHOR_INFO_PATCH_TARGET = "app.routes.opds.fetch_author_info"
+
+
+def _author_info(name=None, bio=None, photo_id=None, size=None):
+    """An AuthorInfo as the provider returns it; *size* is the -L photo's (w, h)."""
+    from pyopds2_openlibrary import AuthorInfo
+    width, height = size if size else (None, None)
+    return AuthorInfo(name, bio, photo_id, width, height)
 
 
 # ---------------------------------------------------------------------------
@@ -904,35 +911,35 @@ class TestStripMarkdown:
 class TestOpdsAuthors:
     def test_happy_path_returns_200(self):
         record = _make_record(title="The Good Lord Bird")
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("James McBride", "An American author.")), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("James McBride", "An American author.")), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             resp = client.get("/authors/OL1234A")
         assert resp.status_code == 200
 
     def test_content_type(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author Name", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author Name", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             resp = client.get("/authors/OL1234A")
         assert "application/opds+json" in resp.headers["content-type"]
 
     def test_metadata_title_is_author_name(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("James McBride", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("James McBride", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         assert data["metadata"]["title"] == "James McBride"
 
     def test_metadata_description_is_bio(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("James McBride", "An American author.")), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("James McBride", "An American author.")), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         assert data["metadata"]["description"] == "An American author."
 
     def test_publications_present(self):
         record = _make_record(title="The Color of Water")
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("James McBride", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("James McBride", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         assert len(data.get("publications", [])) == 1
@@ -940,20 +947,20 @@ class TestOpdsAuthors:
 
     def test_bio_fetch_failure_still_returns_200(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=(None, None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info(None, None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             resp = client.get("/authors/OL1234A")
         assert resp.status_code == 200
 
     def test_bio_failure_uses_olid_as_title(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=(None, None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info(None, None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         assert data["metadata"]["title"] == "OL1234A"
 
     def test_no_books_and_no_bio_returns_404(self):
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=(None, None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info(None, None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[], total=0)):
             resp = client.get("/authors/OL9999A")
         assert resp.status_code == 404
@@ -968,7 +975,7 @@ class TestOpdsAuthors:
 
     def test_self_link_present(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         rels = {l["rel"] for l in data.get("links", [])}
@@ -976,7 +983,7 @@ class TestOpdsAuthors:
 
     def test_first_link_present(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         rels = {l["rel"] for l in data.get("links", [])}
@@ -984,7 +991,7 @@ class TestOpdsAuthors:
 
     def test_next_link_when_more_results(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=50)):
             data = client.get("/authors/OL1234A?limit=25").json()
         rels = {l["rel"] for l in data.get("links", [])}
@@ -992,7 +999,7 @@ class TestOpdsAuthors:
 
     def test_no_next_link_on_last_page(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         rels = {l["rel"] for l in data.get("links", [])}
@@ -1000,7 +1007,7 @@ class TestOpdsAuthors:
 
     def test_previous_link_on_page2(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=50)):
             data = client.get("/authors/OL1234A?page=2&limit=25").json()
         rels = {l["rel"] for l in data.get("links", [])}
@@ -1008,7 +1015,7 @@ class TestOpdsAuthors:
 
     def test_no_previous_link_on_page1(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         rels = {l["rel"] for l in data.get("links", [])}
@@ -1016,7 +1023,7 @@ class TestOpdsAuthors:
 
     def test_author_facets_present(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         facet_titles = {f["metadata"]["title"] for f in data.get("facets", [])}
@@ -1027,7 +1034,7 @@ class TestOpdsAuthors:
 
     def test_author_availability_facet_no_buyable(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
@@ -1036,7 +1043,7 @@ class TestOpdsAuthors:
 
     def test_author_active_mode_marked_with_self_rel(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A?mode=ebooks").json()
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
@@ -1045,7 +1052,7 @@ class TestOpdsAuthors:
 
     def test_author_media_type_filter_forwarded(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)) as mock_s:
             client.get("/authors/OL1234A?media_type=audiobook")
         _, kwargs = mock_s.call_args
@@ -1053,7 +1060,7 @@ class TestOpdsAuthors:
 
     def test_author_facet_links_preserve_filters(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A?mode=ebooks&media_type=ebook").json()
         # Language facet links should carry current mode and media_type
@@ -1081,6 +1088,122 @@ class TestHealth:
 # ---------------------------------------------------------------------------
 # fetch_author_bio helper
 # ---------------------------------------------------------------------------
+
+class TestAuthorPage:
+    """The author page: portrait, bio, popular carousel and their relations."""
+
+    def _get(self, path, info=None, search=None):
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=info or _author_info("Ursula K. Le Guin", "Bio")), \
+             patch(SEARCH_PATCH_TARGET, side_effect=search or (lambda **kw: _make_search_response(records=[_make_record()], total=1))) as mock_search:
+            resp = client.get(path)
+        return resp, mock_search
+
+    def test_portrait_in_the_feed_images_with_its_size(self):
+        from pyopds2_openlibrary import REL_PORTRAIT
+        resp, _ = self._get("/authors/OL31353A", info=_author_info("A", "B", 15165689, (420, 500)))
+        assert resp.json()["images"] == [{
+            "href": "https://covers.openlibrary.org/a/id/15165689-L.jpg",
+            "type": "image/jpeg",
+            "rel": REL_PORTRAIT,
+            "width": 420,
+            "height": 500,
+        }]
+
+    def test_portrait_without_a_known_size_has_no_size(self):
+        resp, _ = self._get("/authors/OL31353A", info=_author_info("A", "B", 15165689))
+        [image] = resp.json()["images"]
+        assert "width" not in image and "height" not in image
+
+    def test_no_photo_no_images(self):
+        resp, _ = self._get("/authors/OL31353A", info=_author_info("A", "B"))
+        assert "images" not in resp.json()
+
+    def test_alternate_link_is_the_open_library_author_page(self):
+        resp, _ = self._get("/authors/OL31353A")
+        [alt] = [l for l in resp.json()["links"] if l["rel"] == "alternate"]
+        assert alt == {"rel": "alternate", "href": "https://openlibrary.org/authors/OL31353A", "type": "text/html"}
+
+    def test_popular_books_carousel_on_page_one(self):
+        from pyopds2_openlibrary import REL_SORT_POPULAR
+        resp, _ = self._get("/authors/OL31353A?mode=ebooks")
+        [group] = resp.json()["groups"]
+        assert group["metadata"]["title"] == "Popular Books"
+        assert group["publications"]
+        [self_link] = group["links"]
+        assert self_link["rel"] == ["self", REL_SORT_POPULAR]
+        assert self_link["href"] == "http://testserver/authors/OL31353A?mode=ebooks&sort=rating"
+
+    def test_popular_search_is_best_rated_with_the_page_filters(self):
+        _, mock_search = self._get("/authors/OL31353A?mode=ebooks&language=fr")
+        popular = [c.kwargs for c in mock_search.call_args_list if c.kwargs.get("sort") == "rating"]
+        assert len(popular) == 1
+        assert popular[0]["limit"] == 50
+        assert popular[0]["require_cover"] is False
+        assert popular[0]["facets"] == {"mode": "ebooks"}
+        assert popular[0]["language"] == "fr"
+        assert popular[0]["query"] == "author_key:OL31353A"
+
+    def test_no_carousel_past_page_one(self):
+        resp, mock_search = self._get("/authors/OL31353A?page=2", search=lambda **kw: _make_search_response(records=[_make_record()], total=60))
+        assert "groups" not in resp.json()
+        assert mock_search.call_count == 1
+
+    def test_no_carousel_on_the_page_it_links_to(self):
+        resp, mock_search = self._get("/authors/OL31353A?sort=rating")
+        assert "groups" not in resp.json()
+        assert mock_search.call_count == 1
+
+    def test_empty_popular_search_drops_the_carousel(self):
+        def search(**kw):
+            if kw.get("sort") == "rating":
+                return _make_search_response(records=[], total=0)
+            return _make_search_response(records=[_make_record()], total=1)
+        resp, _ = self._get("/authors/OL31353A", search=search)
+        assert "groups" not in resp.json()
+        assert resp.json()["publications"]
+
+    def test_failed_popular_search_does_not_fail_the_page(self):
+        def search(**kw):
+            if kw.get("sort") == "rating":
+                raise RuntimeError("solr down")
+            return _make_search_response(records=[_make_record()], total=1)
+        resp, _ = self._get("/authors/OL31353A", search=search)
+        assert resp.status_code == 200
+        assert "groups" not in resp.json()
+
+    def test_sort_is_forwarded_and_kept_in_the_page_links(self):
+        resp, mock_search = self._get("/authors/OL31353A?sort=title", search=lambda **kw: _make_search_response(records=[_make_record()], total=60))
+        assert mock_search.call_args.kwargs["sort"] == "title"
+        links = {l["rel"]: l["href"] for l in resp.json()["links"] if isinstance(l["rel"], str)}
+        assert links["self"].endswith("/authors/OL31353A?sort=title")
+        assert links["next"].endswith("/authors/OL31353A?page=2&sort=title")
+
+    def test_unknown_sort_is_rejected(self):
+        resp, _ = self._get("/authors/OL31353A?sort=bogus")
+        assert resp.status_code == 422
+
+    def test_sort_reaches_the_facets(self):
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("A")), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[_make_record()], total=1)), \
+             patch("app.routes.opds.OpenLibraryDataProvider.build_author_facets", return_value=[]) as facets:
+            client.get("/authors/OL31353A?sort=title")
+        assert facets.call_args.kwargs["sort"] == "title"
+
+    def test_cache_keys_tell_sorts_apart_and_store_the_info(self):
+        keys = []
+
+        class RecordingCache(NullCacheBackend):
+            async def cached(self, key, ttl, fetch, is_valid=None):
+                keys.append(key)
+                return await fetch()
+
+        fastapi_app.dependency_overrides[get_cache] = RecordingCache
+        self._get("/authors/OL31353A")
+        self._get("/authors/OL31353A?sort=title")
+        catalog_keys = [k for k in keys if k.startswith("opds:author_catalog:")]
+        assert len(set(catalog_keys)) == 2
+        assert any(k.startswith("opds:author_info:") for k in keys)
+
 
 class TestFetchAuthorBio:
     def test_happy_path_string_bio(self):
@@ -1159,6 +1282,7 @@ class TestAuthorOpdsLink:
         author = meta.author[0]
         link_types = [l.type for l in (author.links or [])]
         assert "application/opds+json" in link_types
+        assert all(l.rel == "author" for l in author.links)
 
     def test_opds_link_href_contains_olid(self):
         from pyopds2_openlibrary import OpenLibraryDataRecord, OpenLibraryDataProvider
@@ -1366,7 +1490,7 @@ class TestAccessFilter:
 
     def test_author_access_param_forwarded(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)) as mock_s:
             client.get("/authors/OL1234A?access=print_disabled")
         _, kwargs = mock_s.call_args
@@ -1374,7 +1498,7 @@ class TestAccessFilter:
 
     def test_access_facet_links_preserve_current_access(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A?access=print_disabled&mode=ebooks").json()
         access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Access")
@@ -2012,14 +2136,14 @@ class TestLanguageList:
         assert keys[2] != keys[0]
 
     def test_author_links_carry_the_list(self, mock_single_record):
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)):
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)):
             data = client.get("/authors/OL1234A?language=en,fr&page=2").json()
         by_rel = {l["rel"]: unquote_plus(l["href"]) for l in data["links"] if isinstance(l.get("rel"), str)}
         for rel in ("self", "first", "previous"):
             assert "language=en,fr" in by_rel[rel], rel
 
     def test_search_template_takes_the_languages(self, mock_empty_search):
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)):
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)):
             for path in ("/search?query=x", "/authors/OL1234A"):
                 data = client.get(path).json()
                 search = next(l for l in data["links"] if l.get("rel") == "search")
@@ -2094,7 +2218,7 @@ class TestLinkRels:
 
     def test_author_facet_links_carry_their_group_rel(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_BIO_PATCH_TARGET, return_value=("Author", None)), \
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A?mode=ebooks").json()
         _assert_facet_rels(data["facets"])
