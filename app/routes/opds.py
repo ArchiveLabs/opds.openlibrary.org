@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 import asyncio
 import inspect
 
@@ -11,7 +11,13 @@ from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from pyopds2 import Catalog, Link, Metadata
-from pyopds2_openlibrary import OpenLibraryDataProvider, fetch_author_bio
+from pyopds2_openlibrary import (
+    AuthorInfo,
+    OpenLibraryDataProvider,
+    REL_SORT_POPULAR,
+    author_photo_links,
+    fetch_author_info,
+)
 
 import pyopds2_openlibrary as _ol_module
 
@@ -32,7 +38,7 @@ except ImportError:  # an older pyopds2_openlibrary: one value, passed through a
 from app.cache import (
     CacheBackend,
     LANG_OPTIONS_KEY,
-    TTL_AUTHOR_BIO_SECONDS,
+    TTL_AUTHOR_INFO_SECONDS,
     TTL_AUTHOR_CATALOG_SECONDS,
     TTL_BOOK_SECONDS,
     TTL_HOME_DEFAULT_SECONDS,
@@ -86,6 +92,21 @@ def _common_links(base: str) -> list[Link]:
              href="https://archive.org/services/loans/loan/?action=user_profile",
              type="application/opds-profile+json"),
     ]
+
+
+# Sorts an author page accepts: Open Library search.json sort keys.
+AuthorSort = Literal[
+    "rating", "readinglog", "want_to_read", "already_read",
+    "editions", "trending", "new", "old", "title",
+]
+# The Popular Books carousel on page 1 of an author page: the author's
+# best-rated books, its self link the same page sorted that way.
+POPULAR_SORT = "rating"
+POPULAR_GROUP_TITLE = "Popular Books"
+POPULAR_GROUP_DESCRIPTION = "The best-rated books by this author on Open Library."
+# Solr rows asked for; the provider then keeps only works with an acquisition
+# option, which thins the result by a factor of 3 to 10 for most authors.
+POPULAR_GROUP_LIMIT = 50
 
 
 def get_provider(base: str) -> OpenLibraryDataProvider:
@@ -389,48 +410,74 @@ async def opds_authors(
     language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
     media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
+    sort: Optional[AuthorSort] = Query(default=None, description="Sort order of the author's books, an Open Library search sort. Omit for relevance."),
     cache: CacheBackend = Depends(get_cache),
 ):
-    logger.info("GET /authors/%s page=%s limit=%s mode=%s language=%s media_type=%s access=%s", olid, page, limit, mode, language, media_type, access)
+    logger.info("GET /authors/%s page=%s limit=%s mode=%s language=%s media_type=%s access=%s sort=%s", olid, page, limit, mode, language, media_type, access, sort)
     base = _base_url(request)
     provider = get_provider(base)
     language = canonical_language(language)
     mode = canonical_mode(mode)
     media_type = canonical_media_type(media_type)
 
-    bio_key = make_key("author_bio", {"olid": olid})
+    info_key = make_key("author_info", {"olid": olid})
     catalog_key = make_key("author_catalog", {
         "base": base, "olid": olid, "page": page, "limit": limit, "mode": mode,
         "language": language, "media_type": media_type, "access": access,
+        "sort": sort,
     })
+    # The Popular Books carousel belongs to the first page in its default
+    # order; a page already sorted by popularity would only repeat it.
+    want_popular = page == 1 and sort is None
 
-    async def _fetch_bio() -> dict:
-        name, bio = await asyncio.to_thread(fetch_author_bio, olid)
-        return {"name": name, "bio": bio}
+    async def _fetch_info() -> dict:
+        info = await asyncio.to_thread(fetch_author_info, olid)
+        return info._asdict()
+
+    def _fetch_popular():
+        # An enhancement: its failure costs the carousel, not the page.
+        try:
+            return _search(
+                provider,
+                query=f"author_key:{olid}",
+                sort=POPULAR_SORT,
+                limit=POPULAR_GROUP_LIMIT,
+                facets={"mode": mode},
+                language=language,
+                media_type=media_type,
+                require_cover=False,
+                access=access,
+            )
+        except Exception as exc:
+            logger.warning("popular books for %s unavailable: %s", olid, exc)
+            return None
 
     async def _fetch_catalog() -> dict:
-        bio_data, search_response = await asyncio.gather(
-            cache.cached(bio_key, TTL_AUTHOR_BIO_SECONDS, _fetch_bio),
+        info_data, search_response, popular_response = await asyncio.gather(
+            cache.cached(info_key, TTL_AUTHOR_INFO_SECONDS, _fetch_info),
             asyncio.to_thread(
                 _search, provider,
                 query=f"author_key:{olid}",
                 limit=limit,
                 offset=(page - 1) * limit,
+                sort=sort,
                 facets={"mode": mode},
                 language=language,
                 media_type=media_type,
                 require_cover=False,
                 access=access,
             ),
+            asyncio.to_thread(_fetch_popular) if want_popular else asyncio.sleep(0, result=None),
         )
 
-        author_name = bio_data["name"]
-        author_bio = bio_data["bio"]
+        info = AuthorInfo(**info_data)
+        author_name = info.name
+        author_bio = info.bio
 
         if not search_response.records and author_name is None and author_bio is None:
             raise AuthorNotFound(olid)
 
-        def _author_page_href(p: int) -> str:
+        def _author_page_href(p: int, sort_val: Optional[str] = sort) -> str:
             params: dict[str, str] = {}
             if p > 1:
                 params["page"] = str(p)
@@ -444,17 +491,33 @@ async def opds_authors(
                 params["media_type"] = media_type
             if access and access != "general":
                 params["access"] = access
+            if sort_val:
+                params["sort"] = sort_val
             return f"{base}/authors/{olid}?{urlencode(params)}" if params else f"{base}/authors/{olid}"
 
         catalog_links: list[Link] = [
             Link(rel="self", href=_author_page_href(page), type=OPDS_MEDIA_TYPE),
             Link(rel="first", href=_author_page_href(1), type=OPDS_MEDIA_TYPE),
+            Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}/authors/{olid}", type="text/html"),
             *_common_links(base),
         ]
         if page > 1:
             catalog_links.append(Link(rel="previous", href=_author_page_href(page - 1), type=OPDS_MEDIA_TYPE))
         if search_response.has_more:
             catalog_links.append(Link(rel="next", href=_author_page_href(page + 1), type=OPDS_MEDIA_TYPE))
+
+        groups: Optional[list[Catalog]] = None
+        if popular_response is not None and popular_response.records:
+            groups = [Catalog.create(
+                metadata=Metadata(title=POPULAR_GROUP_TITLE, description=POPULAR_GROUP_DESCRIPTION),
+                response=popular_response,
+                paginate=False,
+                links=[Link(
+                    rel=["self", REL_SORT_POPULAR],
+                    href=_author_page_href(1, sort_val=POPULAR_SORT),
+                    type=OPDS_MEDIA_TYPE,
+                )],
+            )]
 
         catalog = Catalog.create(
             metadata=Metadata(
@@ -467,6 +530,7 @@ async def opds_authors(
             response=search_response,
             paginate=False,
             links=catalog_links,
+            groups=groups,
             facets=_call_provider_compat(
                 OpenLibraryDataProvider.build_author_facets,
                 base_url=base,
@@ -477,9 +541,16 @@ async def opds_authors(
                 page=page,
                 limit=limit,
                 access=access,
+                sort=sort,
             ),
         )
-        return catalog.model_dump()
+        data = catalog.model_dump()
+        # The author's photo: a feed-level ``images`` collection, which the
+        # OPDS 2.0 feed schema admits as a subcollection.
+        images = author_photo_links(info)
+        if images:
+            data["images"] = [link.model_dump(exclude_none=True) for link in images]
+        return data
 
     data = await cache.cached(catalog_key, TTL_AUTHOR_CATALOG_SECONDS, _fetch_catalog)
     return opds_response(data)

@@ -63,9 +63,33 @@ only those.
 
 ## Carousels
 
-The home feed's `groups` are its carousels, each a collection with a
-`self` link to the feed it is the first page of. Besides `self`, the
-Trending Books carousel's self link carries the registered
-`http://opds-spec.org/sort/popular`, so a client finds it by relation. No
-other carousel carries a second relation yet; one that needs its own will
-be coined under `https://openlibrary.org/opds/rel/` and documented here.
+A feed's `groups` are its carousels, each a collection with a `self` link
+to the feed it is the first page of. Besides `self`, a carousel's self link
+may carry a relation saying what the carousel is. The home feed's Trending
+Books carousel and the author page's Popular Books carousel both carry the
+registered `http://opds-spec.org/sort/popular`, so a client finds the
+popular carousel of any feed by relation. A carousel that needs a relation
+of its own will be coined under `https://openlibrary.org/opds/rel/` and
+documented here.
+
+## Author pages
+
+An author page, `/authors/<olid>`, is the feed of an author's books. Its
+`metadata.title` is the author's name and `metadata.description` their
+biography, both as OPDS 2.0's feed metadata allows. The feed's `links`
+carry `alternate` to the author's page on openlibrary.org, and every book's
+author contributor links to the page twice with `rel` `author`: the HTML
+page as `text/html`, this feed as `application/opds+json`. Its first page
+in default order has the Popular Books carousel, the author's best-rated
+books, whose self link is the same page with `sort=rating`.
+
+### portrait
+
+`https://openlibrary.org/opds/rel/portrait`
+
+A picture of the person a feed is about. OPDS 2.0 gives a publication an
+`images` collection; its feed schema admits the same collection on a feed,
+and this relation on an entry says the image is the person's portrait
+rather than a cover or a banner. On an author page it is the author's photo
+at `https://covers.openlibrary.org/a/id/<photo>-L.jpg`, with `width` and
+`height` the pixel size of that file when it is known.
