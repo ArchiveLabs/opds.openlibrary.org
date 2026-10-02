@@ -7,6 +7,7 @@ import os
 import time
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app.cache import get_cache, LANG_OPTIONS_KEY, TTL_LANG_OPTIONS_SECONDS
@@ -84,6 +85,15 @@ if CORS_ENABLED:
         allow_methods=["GET"],
         allow_headers=["*"],
     )
+
+
+# A feed is JSON and compresses about ten to one, and nothing in front of
+# this app compresses for it: production answered a request offering gzip
+# with 450 KB of an author page uncompressed, over a link that drained it at
+# tens of KB a second and cut it off before the end. Starlette only encodes
+# when the client asks (Accept-Encoding), and nginx passes an upstream
+# encoding through rather than encoding twice.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 class EndpointFilter(logging.Filter):

@@ -1085,6 +1085,27 @@ class TestHealth:
 # AuthorNotFound exception
 # ---------------------------------------------------------------------------
 
+class TestCompression:
+    """Responses are gzipped for a client that asks, and left alone otherwise."""
+
+    def _author_page(self, headers):
+        records = [_make_record(title=f"Book {i}") for i in range(10)]
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Mary Shelley", "Bio")), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=records, total=10)):
+            return client.get("/authors/OL25342A", headers=headers)
+
+    def test_gzipped_when_the_client_accepts_it(self):
+        resp = self._author_page({"accept-encoding": "gzip"})
+        assert resp.status_code == 200
+        assert resp.headers["content-encoding"] == "gzip"
+        assert resp.json()["metadata"]["title"] == "Mary Shelley"
+
+    def test_plain_when_the_client_does_not(self):
+        resp = self._author_page({"accept-encoding": "identity"})
+        assert resp.status_code == 200
+        assert "content-encoding" not in resp.headers
+
+
 # ---------------------------------------------------------------------------
 # fetch_author_bio helper
 # ---------------------------------------------------------------------------
@@ -1137,7 +1158,7 @@ class TestAuthorPage:
         _, mock_search = self._get("/authors/OL31353A?mode=ebooks&language=fr")
         popular = [c.kwargs for c in mock_search.call_args_list if c.kwargs.get("sort") == "rating"]
         assert len(popular) == 1
-        assert popular[0]["limit"] == 50
+        assert popular[0]["limit"] == 5
         assert popular[0]["require_cover"] is False
         assert popular[0]["facets"] == {"mode": "ebooks"}
         assert popular[0]["language"] == "fr"
