@@ -85,6 +85,23 @@ def test_home_no_duplicate_trending(client: httpx.Client) -> None:
     )
 
 
+@pytest.mark.e2e
+def test_home_trending_carousel_carries_sort_popular(client: httpx.Client) -> None:
+    """The Trending Books carousel's self link carries OPDS's sort/popular
+    besides self, so a client finds it by relation rather than by title."""
+    r = client.get("/")
+    assert r.status_code == 200
+    trending = next(
+        (g for g in r.json().get("groups", [])
+         if g.get("metadata", {}).get("title") == "Trending Books"),
+        None,
+    )
+    assert trending is not None, "Trending Books carousel missing from page 1"
+    self_links = [l for l in trending.get("links", []) if _has_rel(l, "self")]
+    assert len(self_links) == 1
+    assert self_links[0]["rel"] == ["self", "http://opds-spec.org/sort/popular"]
+
+
 # ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------
@@ -107,6 +124,48 @@ def test_search_availability_facets_present(client: httpx.Client) -> None:
     facets = r.json().get("facets", [])
     titles = [f.get("metadata", {}).get("title") for f in facets]
     assert "Availability" in titles, f"Availability facet group missing; got: {titles}"
+
+
+FACET_RELS = {
+    "Availability": "https://openlibrary.org/opds/rel/facet/availability",
+    "Language": "https://openlibrary.org/opds/rel/facet/language",
+    "Media Type": "https://openlibrary.org/opds/rel/facet/media-type",
+    "Access": "https://openlibrary.org/opds/rel/facet/access",
+}
+
+
+def _has_rel(link: dict, rel: str) -> bool:
+    value = link.get("rel")
+    return rel in value if isinstance(value, list) else value == rel
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("path", ["/search?query=tolkien&mode=ebooks", "/?media_type=ebook", "/authors/OL23919A"])
+def test_facet_links_carry_their_group_rel(client: httpx.Client, path: str) -> None:
+    """Every option link of a facet group carries the group's relation, the
+    applied option ["self", <relation>] — what a client selects facets by."""
+    r = client.get(path)
+    assert r.status_code == 200
+    facets = r.json().get("facets", [])
+    assert [f["metadata"]["title"] for f in facets] == list(FACET_RELS), path
+    for group in facets:
+        rel = FACET_RELS[group["metadata"]["title"]]
+        for link in group["links"]:
+            assert _has_rel(link, rel), (path, group["metadata"]["title"], link)
+        applied = [l for l in group["links"] if _has_rel(l, "self")]
+        assert len(applied) == 1, (path, group["metadata"]["title"])
+        assert applied[0]["rel"] == ["self", rel]
+
+
+@pytest.mark.e2e
+def test_facet_rels_resolve(client: httpx.Client) -> None:
+    """A relation the feed coins is a URL that resolves to its documentation.
+    Checked on the instance under test, at the path under its own base."""
+    for rel in FACET_RELS.values():
+        r = client.get(rel.removeprefix("https://openlibrary.org/opds"))
+        assert r.status_code == 200, rel
+        assert r.headers["content-type"].startswith("text/html")
+        assert rel in r.text
 
 
 @pytest.mark.e2e

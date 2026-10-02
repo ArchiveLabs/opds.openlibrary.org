@@ -17,6 +17,7 @@ matches nothing.
 | Search | GET | `^/search(\?.*)?$` |
 | Single Edition | GET | `^/books/OL[0-9]+M$` |
 | Author Catalog | GET | `^/authors/OL[0-9]+A(\?.*)?$` |
+| Link relation docs | GET | `^/rel(/[a-z0-9/-]*)?$` |
 | Health Check | GET | `^/health$` |
 | Service Worker | GET | `^/sw\.js$` |
 | iCloud asset relay | POST, OPTIONS | `^/icloud/asset(\?.*)?$` |
@@ -25,7 +26,7 @@ matches nothing.
 ## Combined Allow-List
 
 ```
-^/(\?.*|search(\?.*)?|books/OL[0-9]+M|authors/OL[0-9]+A(\?.*)?|health|sw\.js|icloud/asset(\?.*)?|icloud/relay-status)?$
+^/(\?.*|search(\?.*)?|books/OL[0-9]+M|authors/OL[0-9]+A(\?.*)?|rel(/[a-z0-9/-]*)?|health|sw\.js|icloud/asset(\?.*)?|icloud/relay-status)?$
 ```
 
 ## Notes
@@ -37,5 +38,6 @@ matches nothing.
 - **`mode` and `media_type` are lists too**: `mode=ebooks,open_access`, `media_type=ebook,audiobook` (commas URL-encoded as `%2C` in the links the feed emits), on the same three endpoints
 - **Author query params**: `/authors/{olid}` takes `page`, `limit`, `mode`, `language`, `media_type` and `access`
 - **Search query params**: `/search` query parameters contain Solr syntax (`[]`, `*`, `:`, spaces) — the WAF must not block these as injection attempts
+- **Link relation docs**: `/rel/…` serves HTML, not OPDS JSON — the page a `rel` such as `https://openlibrary.org/opds/rel/facet/availability` resolves to. GET only, no query parameters
 - **Docs endpoints**: `/docs`, `/redoc`, `/openapi.json` are disabled unconditionally in the `FastAPI(...)` constructor; block them at the WAF as well
 - **Sentry debug**: `/sentry-debug` is always registered but answers 404 when `ENVIRONMENT == "production"` — block in production WAF rules
