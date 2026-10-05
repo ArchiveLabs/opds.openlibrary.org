@@ -1256,7 +1256,7 @@ class TestAuthorPage:
         _, mock_search = self._get("/authors/OL31353A?mode=ebooks&language=fr")
         popular = [c.kwargs for c in mock_search.call_args_list if c.kwargs.get("sort") == "rating"]
         assert len(popular) == 1
-        assert popular[0]["limit"] == 5
+        assert popular[0]["limit"] == 10
         assert popular[0]["require_cover"] is False
         assert popular[0]["facets"] == {"mode": "ebooks"}
         assert popular[0]["language"] == "fr"

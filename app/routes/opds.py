@@ -105,13 +105,13 @@ AuthorSort = Literal[
 POPULAR_SORT = "rating"
 POPULAR_GROUP_TITLE = "Popular Books"
 POPULAR_GROUP_DESCRIPTION = "The best-rated books by this author on Open Library."
-# Solr rows asked for. A handful: the carousel is a taste of the author, and
-# its self link is the whole page sorted the same way for anyone who wants
-# more. Fifty rows made the page 450 KB, most of it this carousel, and a page
-# that size was being cut off in transit before the reader saw it. The
-# provider keeps only works with an acquisition option, which the query's
-# servable-only floor already makes most of them.
-POPULAR_GROUP_LIMIT = 5
+# Solr rows asked for. Ten: the carousel is a taste of the author, and its
+# self link is the whole page sorted the same way for anyone who wants more.
+# Fifty rows made the page 450 KB, most of it this carousel, and a page that
+# size was being cut off in transit before the reader saw it; five felt thin
+# in the reader's carousel. The provider keeps only works with an acquisition
+# option, which the query's servable-only floor already makes most of them.
+POPULAR_GROUP_LIMIT = 10
 
 
 def get_provider(base: str) -> OpenLibraryDataProvider:
