@@ -1,4 +1,4 @@
-.PHONY: install serve test test-e2e tunnel lint
+.PHONY: install serve test test-e2e tunnel lint author-descriptions
 
 # Install dependencies into the active environment
 install:
@@ -46,3 +46,10 @@ tunnel:
 
 lint:
 	pre-commit run --all-files
+
+# Rebuild app/data/author_descriptions.tsv.gz, the one-line Wikidata
+# description of every Open Library author, from QLever's Wikidata mirror
+# (about 15s). Stdlib only. Commit the result; the output is reproducible,
+# so an unchanged table gives no diff.
+author-descriptions:
+	python3 scripts/build_author_descriptions.py

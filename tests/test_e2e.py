@@ -272,7 +272,11 @@ def test_author_page_has_portrait_bio_and_popular_books(client: httpx.Client) ->
     assert r.status_code == 200, r.text[:200]
     body = r.json()
     assert body["metadata"]["title"] == "Ursula K. Le Guin"
-    assert body["metadata"]["description"]
+    # The one-line Wikidata description from the shipped table, not the
+    # multi-paragraph biography.
+    description = body["metadata"]["description"]
+    assert description and "\n" not in description and len(description) < 200
+    assert "author" in description.lower()
     [image] = body["images"]
     assert image["href"].startswith("https://covers.openlibrary.org/a/id/")
     assert image["rel"] == "https://openlibrary.org/opds/rel/portrait"

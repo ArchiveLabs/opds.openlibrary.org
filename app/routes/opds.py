@@ -60,6 +60,7 @@ from app.config import (
 )
 import sentry_sdk
 
+from app.author_descriptions import author_description
 from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
 from app.logger import get_logger
 
@@ -477,6 +478,11 @@ async def opds_authors(
         info = AuthorInfo(**info_data)
         author_name = info.name
         author_bio = info.bio
+        # The feed's description is the one-line summary Open Library shows
+        # under the portrait, the author's Wikidata description, never the
+        # full biography. It comes from a table shipped with the app, so it
+        # costs no request (see app/author_descriptions.py).
+        author_summary = author_description(olid)
 
         if not search_response.records and author_name is None and author_bio is None:
             raise AuthorNotFound(olid)
@@ -526,7 +532,7 @@ async def opds_authors(
         catalog = Catalog.create(
             metadata=Metadata(
                 title=author_name or olid,
-                description=author_bio,
+                description=author_summary,
                 numberOfItems=search_response.total,
                 itemsPerPage=limit,
                 currentPage=page,

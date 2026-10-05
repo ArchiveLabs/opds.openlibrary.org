@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
+from app import author_descriptions
 from app.cache import get_cache, LANG_OPTIONS_KEY, TTL_LANG_OPTIONS_SECONDS
 from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
 from app.logger import get_logger
@@ -57,6 +58,9 @@ def _warm_language_cache() -> None:
 async def lifespan(_: FastAPI):
     logger.info("OPDS service starting up (sentry=%s)", sentry_enabled)
     if ENVIRONMENT != "test":
+        # The author descriptions table is read once per worker; do it now
+        # rather than on the first author page.
+        await asyncio.to_thread(author_descriptions.size)
         await asyncio.to_thread(_warm_language_cache)
     yield
 

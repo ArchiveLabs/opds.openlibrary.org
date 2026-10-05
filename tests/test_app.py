@@ -38,6 +38,7 @@ LANG_COUNTS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.fetch_langua
 BUILD_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_facets"
 BUILD_HOME_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_home_facets"
 FETCH_AUTHOR_INFO_PATCH_TARGET = "app.routes.opds.fetch_author_info"
+AUTHOR_DESCRIPTION_PATCH_TARGET = "app.routes.opds.author_description"
 
 
 def _author_info(name=None, bio=None, photo_id=None, size=None):
@@ -930,12 +931,32 @@ class TestOpdsAuthors:
             data = client.get("/authors/OL1234A").json()
         assert data["metadata"]["title"] == "James McBride"
 
-    def test_metadata_description_is_bio(self):
+    def test_metadata_description_is_the_tables_one_liner_not_the_bio(self):
         record = _make_record()
-        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("James McBride", "An American author.")), \
+        bio = "Albert Camus was a French Algerian author, philosopher, and journalist who ..."
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Albert Camus", bio)), \
+             patch(AUTHOR_DESCRIPTION_PATCH_TARGET, return_value="French philosopher, author, and journalist (1913–1960)") as lookup, \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A").json()
-        assert data["metadata"]["description"] == "An American author."
+        assert data["metadata"]["description"] == "French philosopher, author, and journalist (1913–1960)"
+        assert lookup.call_args.args == ("OL1234A",)
+
+    def test_no_table_entry_means_no_description_even_with_a_bio(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("James McBride", "An American author.")), \
+             patch(AUTHOR_DESCRIPTION_PATCH_TARGET, return_value=None), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        assert "description" not in data["metadata"]
+
+    def test_the_description_comes_from_the_shipped_table(self):
+        # Ursula K. Le Guin is in app/data/author_descriptions.tsv.gz; no
+        # network call is involved, so no patching of a lookup either.
+        record = _make_record()
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Ursula K. Le Guin", "Bio")), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL31353A").json()
+        assert data["metadata"]["description"] == "American fantasy and science fiction author (1929–2018)"
 
     def test_publications_present(self):
         record = _make_record(title="The Color of Water")
