@@ -9,6 +9,7 @@ A stand-alone, dockerized [FastAPI](https://fastapi.tiangolo.com/) service that 
 ```
 app/
   main.py              # FastAPI app + exception handlers
+  author_descriptions.py  # Lookup of an author's one-line Wikidata description
   logger.py            # Central logging factory (stdout only)
   config/
     __init__.py        # Media types, env vars, featured subjects
@@ -16,11 +17,14 @@ app/
     __init__.py        # OPDSException, EditionNotFound, UpstreamError
   routes/
     opds.py            # All route handlers (/, /search, /books/*, /authors/*)
+  data/
+    author_descriptions.tsv.gz  # Every OL author's Wikidata description (built, committed)
 docker/
   Dockerfile           # Docker image definition
   docker-compose.yml   # Compose service definition
 scripts/
   configure.sh         # Generates .env from defaults
+  build_author_descriptions.py  # Rebuilds app/data/author_descriptions.tsv.gz
 ```
 
 ---
@@ -64,7 +68,11 @@ carousel's on an author page, also carry the registered
 openlibrary.org page as `alternate`, every book's author contributor links
 to both the HTML page and the author page with `rel` `author`, and the
 author's photo is a feed-level `images` entry carrying
-`https://openlibrary.org/opds/rel/portrait`. The feed's own relations are extension
+`https://openlibrary.org/opds/rel/portrait`. The author feed's `metadata.description`
+is the one-line summary shown under the portrait on openlibrary.org, the
+author's Wikidata description, not the full biography; it is looked up in
+a table shipped with the app (see [Author descriptions](#author-descriptions)),
+never fetched per page. The feed's own relations are extension
 relations (RFC 8288): fixed strings, the same on every deployment, that
 resolve to [app/docs/link-relations.md](app/docs/link-relations.md), served
 at `/rel/…`. Check a `rel` for membership, not equality: `has_rel` in
@@ -187,6 +195,31 @@ pytest tests/test_e2e.py -m e2e -v    # terminal 2
 
 E2e tests are skipped by default (`pytest` without `-m e2e`) to keep CI fast.
 Run them manually before opening a PR or after deploying to any environment.
+
+---
+
+## Author descriptions
+
+The one-line summary on an author page is the English description of the
+author's Wikidata item, which no Open Library API carries. Rather than ask
+wikidata.org on every author page, the service ships the whole table:
+`app/data/author_descriptions.tsv.gz`, one `OLID<TAB>description` line per
+author, about 245,000 rows and 3 MB gzipped, read into memory once per
+worker (about 15 MB). An author page never makes a request for it.
+
+The table goes stale as Wikidata gains links and descriptions, so rebuild
+it now and then and commit the result:
+
+```bash
+make author-descriptions
+# or: python3 scripts/build_author_descriptions.py
+```
+
+It runs one SPARQL query against QLever's Wikidata mirror (about 15
+seconds; the public query.wikidata.org endpoint times out halfway) and
+writes a reproducible file, so an unchanged table gives no diff. An author
+linked on Wikidata after the last build has no description until the next
+one.
 
 ---
 
