@@ -3,8 +3,10 @@
 Open Library shows a one-line summary under an author's portrait, e.g.
 "French philosopher, author, and journalist (1913–1960)" for Camus. It is
 the English description of the author's Wikidata item and is in no Open
-Library API. Fetching it from wikidata.org would add a request to every
-author page, so the service carries the whole table instead:
+Library API. The author feed carries it as ``metadata.subtitle``, next to
+the full biography in ``metadata.description``. Fetching it from
+wikidata.org would add a request to every author page, so the service
+carries the whole table instead:
 ``app/data/author_descriptions.tsv.gz``, one ``OLID<TAB>description`` line
 per author, built by ``scripts/build_author_descriptions.py`` (``make
 author-descriptions``). A lookup here never touches the network; an author

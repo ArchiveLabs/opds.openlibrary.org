@@ -478,10 +478,11 @@ async def opds_authors(
         info = AuthorInfo(**info_data)
         author_name = info.name
         author_bio = info.bio
-        # The feed's description is the one-line summary Open Library shows
-        # under the portrait, the author's Wikidata description, never the
-        # full biography. It comes from a table shipped with the app, so it
-        # costs no request (see app/author_descriptions.py).
+        # The feed carries both texts about the author: the one-line summary
+        # Open Library shows under the portrait (the author's Wikidata
+        # description) as ``metadata.subtitle``, and the full biography as
+        # ``metadata.description``. The summary comes from a table shipped
+        # with the app, so it costs no request (see app/author_descriptions.py).
         author_summary = author_description(olid)
 
         if not search_response.records and author_name is None and author_bio is None:
@@ -532,7 +533,8 @@ async def opds_authors(
         catalog = Catalog.create(
             metadata=Metadata(
                 title=author_name or olid,
-                description=author_summary,
+                subtitle=author_summary,
+                description=author_bio,
                 numberOfItems=search_response.total,
                 itemsPerPage=limit,
                 currentPage=page,
