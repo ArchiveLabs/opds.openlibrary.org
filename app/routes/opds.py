@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.responses import JSONResponse
 
-from pyopds2 import Catalog, Link, Metadata
+from pyopds2 import Catalog, Link, Metadata, Navigation
 from pyopds2_openlibrary import (
     AuthorInfo,
     OpenLibraryDataProvider,
@@ -405,20 +405,97 @@ async def opds_books(
     return opds_pub_response(data)
 
 
-@router.get("/authors/{olid}", summary="OPDS 2.0 author catalog")
+def _author_books_href(
+    base: str,
+    olid: str,
+    page: int = 1,
+    limit: int = 25,
+    mode: str = "everything",
+    language: Optional[str] = None,
+    media_type: Optional[str] = None,
+    access: Optional[str] = None,
+    sort: Optional[str] = None,
+) -> str:
+    """The URL of a page of an author's books, defaults left out."""
+    params: dict[str, str] = {}
+    if page > 1:
+        params["page"] = str(page)
+    if limit != 25:
+        params["limit"] = str(limit)
+    if mode != "everything":
+        params["mode"] = mode
+    if language:
+        params["language"] = language
+    if media_type:
+        params["media_type"] = media_type
+    if access and access != "general":
+        params["access"] = access
+    if sort:
+        params["sort"] = sort
+    path = f"{base}/authors/{olid}/books"
+    return f"{path}?{urlencode(params)}" if params else path
+
+
+def _author_page_href(
+    base: str,
+    olid: str,
+    mode: str = "everything",
+    language: Optional[str] = None,
+    media_type: Optional[str] = None,
+    access: Optional[str] = None,
+) -> str:
+    """The URL of an author's page, defaults left out."""
+    params: dict[str, str] = {}
+    if mode != "everything":
+        params["mode"] = mode
+    if language:
+        params["language"] = language
+    if media_type:
+        params["media_type"] = media_type
+    if access and access != "general":
+        params["access"] = access
+    path = f"{base}/authors/{olid}"
+    return f"{path}?{urlencode(params)}" if params else path
+
+
+def _all_books_title(author_name: Optional[str]) -> str:
+    return f"All {author_name}'s books" if author_name else "All books"
+
+
+def _author_feed_data(catalog: Catalog, info: AuthorInfo) -> dict:
+    """Serialise an author feed with the author's photo as a feed-level
+    ``images`` collection, which the OPDS 2.0 feed schema admits as a
+    subcollection."""
+    data = catalog.model_dump()
+    images = author_photo_links(info)
+    if images:
+        data["images"] = [link.model_dump(exclude_none=True) for link in images]
+    return data
+
+
+_FILTER_DOCS = {
+    "language": "Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages.",
+    "media_type": "Media type filter: ebook, audiobook, or both comma-separated. Omit for all.",
+    "access": "Access filter: general (default), print_disabled.",
+}
+
+
+@router.get("/authors/{olid}", summary="OPDS 2.0 author page")
 async def opds_authors(
     request: Request,
     olid: str = Path(..., pattern=r"^OL\d+A$"),
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=25, ge=1, le=100),
     mode: str = Query(default="everything"),
-    language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
-    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
-    access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
-    sort: Optional[AuthorSort] = Query(default=None, description="Sort order of the author's books, an Open Library search sort. Omit for relevance."),
+    language: Optional[str] = Query(default=None, description=_FILTER_DOCS["language"]),
+    media_type: Optional[str] = Query(default=None, description=_FILTER_DOCS["media_type"]),
+    access: Optional[str] = Query(default=None, description=_FILTER_DOCS["access"]),
     cache: CacheBackend = Depends(get_cache),
 ):
-    logger.info("GET /authors/%s page=%s limit=%s mode=%s language=%s media_type=%s access=%s sort=%s", olid, page, limit, mode, language, media_type, access, sort)
+    """The page about an author: name, one-line summary and biography,
+    portrait, the Popular Books carousel, and a navigation entry to the
+    feed of all their books (``/authors/{olid}/books``), which is where the
+    list, its facets and its pages live. The filters here narrow the
+    carousel and are carried into that entry's link."""
+    logger.info("GET /authors/%s mode=%s language=%s media_type=%s access=%s", olid, mode, language, media_type, access)
     base = _base_url(request)
     provider = get_provider(base)
     language = canonical_language(language)
@@ -426,14 +503,10 @@ async def opds_authors(
     media_type = canonical_media_type(media_type)
 
     info_key = make_key("author_info", {"olid": olid})
-    catalog_key = make_key("author_catalog", {
-        "base": base, "olid": olid, "page": page, "limit": limit, "mode": mode,
+    page_key = make_key("author_page", {
+        "base": base, "olid": olid, "mode": mode,
         "language": language, "media_type": media_type, "access": access,
-        "sort": sort,
     })
-    # The Popular Books carousel belongs to the first page in its default
-    # order; a page already sorted by popularity would only repeat it.
-    want_popular = page == 1 and sort is None
 
     async def _fetch_info() -> dict:
         info = await asyncio.to_thread(fetch_author_info, olid)
@@ -457,8 +530,99 @@ async def opds_authors(
             logger.warning("popular books for %s unavailable: %s", olid, exc)
             return None
 
+    async def _fetch_page() -> dict:
+        info_data, popular_response = await asyncio.gather(
+            cache.cached(info_key, TTL_AUTHOR_INFO_SECONDS, _fetch_info),
+            asyncio.to_thread(_fetch_popular),
+        )
+        info = AuthorInfo(**info_data)
+        # The feed carries both texts about the author: the one-line summary
+        # Open Library shows under the portrait (the author's Wikidata
+        # description) as ``metadata.subtitle``, and the full biography as
+        # ``metadata.description``. The summary comes from a table shipped
+        # with the app, so it costs no request (see app/author_descriptions.py).
+        author_summary = author_description(olid)
+
+        has_books = popular_response is not None and bool(popular_response.records)
+        if not has_books and info.name is None and info.bio is None:
+            raise AuthorNotFound(olid)
+
+        filters = dict(mode=mode, language=language, media_type=media_type, access=access)
+        groups: Optional[list[Catalog]] = None
+        if has_books:
+            groups = [Catalog.create(
+                metadata=Metadata(title=POPULAR_GROUP_TITLE, description=POPULAR_GROUP_DESCRIPTION),
+                response=popular_response,
+                paginate=False,
+                links=[Link(
+                    rel=["self", REL_SORT_POPULAR],
+                    href=_author_books_href(base, olid, sort=POPULAR_SORT, **filters),
+                    type=OPDS_MEDIA_TYPE,
+                )],
+            )]
+
+        catalog = Catalog(
+            metadata=Metadata(
+                title=info.name or olid,
+                subtitle=author_summary,
+                description=info.bio,
+            ),
+            links=[
+                Link(rel="self", href=_author_page_href(base, olid, **filters), type=OPDS_MEDIA_TYPE),
+                Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}/authors/{olid}", type="text/html"),
+                *_common_links(base),
+            ],
+            # The list of all the author's books is its own feed; the page
+            # points at it with a navigation entry, a subsection of this one.
+            navigation=[Navigation(
+                href=_author_books_href(base, olid, **filters),
+                title=_all_books_title(info.name),
+                type=OPDS_MEDIA_TYPE,
+                rel="subsection",
+            )],
+            groups=groups,
+        )
+        return _author_feed_data(catalog, info)
+
+    data = await cache.cached(page_key, TTL_AUTHOR_CATALOG_SECONDS, _fetch_page)
+    return opds_response(data)
+
+
+@router.get("/authors/{olid}/books", summary="OPDS 2.0 feed of all an author's books")
+async def opds_author_books(
+    request: Request,
+    olid: str = Path(..., pattern=r"^OL\d+A$"),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    mode: str = Query(default="everything"),
+    language: Optional[str] = Query(default=None, description=_FILTER_DOCS["language"]),
+    media_type: Optional[str] = Query(default=None, description=_FILTER_DOCS["media_type"]),
+    access: Optional[str] = Query(default=None, description=_FILTER_DOCS["access"]),
+    sort: Optional[AuthorSort] = Query(default=None, description="Sort order of the author's books, an Open Library search sort. Omit for relevance."),
+    cache: CacheBackend = Depends(get_cache),
+):
+    """Every book by an author, paginated and faceted, titled "All X's
+    books"; ``up`` leads back to the author's page."""
+    logger.info("GET /authors/%s/books page=%s limit=%s mode=%s language=%s media_type=%s access=%s sort=%s", olid, page, limit, mode, language, media_type, access, sort)
+    base = _base_url(request)
+    provider = get_provider(base)
+    language = canonical_language(language)
+    mode = canonical_mode(mode)
+    media_type = canonical_media_type(media_type)
+
+    info_key = make_key("author_info", {"olid": olid})
+    catalog_key = make_key("author_catalog", {
+        "base": base, "olid": olid, "page": page, "limit": limit, "mode": mode,
+        "language": language, "media_type": media_type, "access": access,
+        "sort": sort,
+    })
+
+    async def _fetch_info() -> dict:
+        info = await asyncio.to_thread(fetch_author_info, olid)
+        return info._asdict()
+
     async def _fetch_catalog() -> dict:
-        info_data, search_response, popular_response = await asyncio.gather(
+        info_data, search_response = await asyncio.gather(
             cache.cached(info_key, TTL_AUTHOR_INFO_SECONDS, _fetch_info),
             asyncio.to_thread(
                 _search, provider,
@@ -472,69 +636,31 @@ async def opds_authors(
                 require_cover=False,
                 access=access,
             ),
-            asyncio.to_thread(_fetch_popular) if want_popular else asyncio.sleep(0, result=None),
         )
-
         info = AuthorInfo(**info_data)
-        author_name = info.name
-        author_bio = info.bio
-        # The feed carries both texts about the author: the one-line summary
-        # Open Library shows under the portrait (the author's Wikidata
-        # description) as ``metadata.subtitle``, and the full biography as
-        # ``metadata.description``. The summary comes from a table shipped
-        # with the app, so it costs no request (see app/author_descriptions.py).
-        author_summary = author_description(olid)
 
-        if not search_response.records and author_name is None and author_bio is None:
+        if not search_response.records and info.name is None and info.bio is None:
             raise AuthorNotFound(olid)
 
-        def _author_page_href(p: int, sort_val: Optional[str] = sort) -> str:
-            params: dict[str, str] = {}
-            if p > 1:
-                params["page"] = str(p)
-            if limit != 25:
-                params["limit"] = str(limit)
-            if mode != "everything":
-                params["mode"] = mode
-            if language:
-                params["language"] = language
-            if media_type:
-                params["media_type"] = media_type
-            if access and access != "general":
-                params["access"] = access
-            if sort_val:
-                params["sort"] = sort_val
-            return f"{base}/authors/{olid}?{urlencode(params)}" if params else f"{base}/authors/{olid}"
+        filters = dict(mode=mode, language=language, media_type=media_type, access=access)
+
+        def _href(p: int) -> str:
+            return _author_books_href(base, olid, page=p, limit=limit, sort=sort, **filters)
 
         catalog_links: list[Link] = [
-            Link(rel="self", href=_author_page_href(page), type=OPDS_MEDIA_TYPE),
-            Link(rel="first", href=_author_page_href(1), type=OPDS_MEDIA_TYPE),
-            Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}/authors/{olid}", type="text/html"),
+            Link(rel="self", href=_href(page), type=OPDS_MEDIA_TYPE),
+            Link(rel="first", href=_href(1), type=OPDS_MEDIA_TYPE),
+            Link(rel="up", href=_author_page_href(base, olid, **filters), type=OPDS_MEDIA_TYPE),
             *_common_links(base),
         ]
         if page > 1:
-            catalog_links.append(Link(rel="previous", href=_author_page_href(page - 1), type=OPDS_MEDIA_TYPE))
+            catalog_links.append(Link(rel="previous", href=_href(page - 1), type=OPDS_MEDIA_TYPE))
         if search_response.has_more:
-            catalog_links.append(Link(rel="next", href=_author_page_href(page + 1), type=OPDS_MEDIA_TYPE))
-
-        groups: Optional[list[Catalog]] = None
-        if popular_response is not None and popular_response.records:
-            groups = [Catalog.create(
-                metadata=Metadata(title=POPULAR_GROUP_TITLE, description=POPULAR_GROUP_DESCRIPTION),
-                response=popular_response,
-                paginate=False,
-                links=[Link(
-                    rel=["self", REL_SORT_POPULAR],
-                    href=_author_page_href(1, sort_val=POPULAR_SORT),
-                    type=OPDS_MEDIA_TYPE,
-                )],
-            )]
+            catalog_links.append(Link(rel="next", href=_href(page + 1), type=OPDS_MEDIA_TYPE))
 
         catalog = Catalog.create(
             metadata=Metadata(
-                title=author_name or olid,
-                subtitle=author_summary,
-                description=author_bio,
+                title=_all_books_title(info.name),
                 numberOfItems=search_response.total,
                 itemsPerPage=limit,
                 currentPage=page,
@@ -542,11 +668,11 @@ async def opds_authors(
             response=search_response,
             paginate=False,
             links=catalog_links,
-            groups=groups,
             facets=_call_provider_compat(
                 OpenLibraryDataProvider.build_author_facets,
                 base_url=base,
                 olid=olid,
+                path=f"/authors/{olid}/books",
                 mode=mode,
                 language=language,
                 media_type=media_type,
@@ -556,13 +682,7 @@ async def opds_authors(
                 sort=sort,
             ),
         )
-        data = catalog.model_dump()
-        # The author's photo: a feed-level ``images`` collection, which the
-        # OPDS 2.0 feed schema admits as a subcollection.
-        images = author_photo_links(info)
-        if images:
-            data["images"] = [link.model_dump(exclude_none=True) for link in images]
-        return data
+        return catalog.model_dump()
 
     data = await cache.cached(catalog_key, TTL_AUTHOR_CATALOG_SECONDS, _fetch_catalog)
     return opds_response(data)

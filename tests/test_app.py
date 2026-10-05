@@ -974,7 +974,7 @@ class TestOpdsAuthors:
         record = _make_record(title="The Color of Water")
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("James McBride", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A").json()
+            data = client.get("/authors/OL1234A/books").json()
         assert len(data.get("publications", [])) == 1
         assert data["publications"][0]["metadata"]["title"] == "The Color of Water"
 
@@ -1010,7 +1010,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A").json()
+            data = client.get("/authors/OL1234A/books").json()
         rels = {l["rel"] for l in data.get("links", [])}
         assert "self" in rels
 
@@ -1018,7 +1018,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A").json()
+            data = client.get("/authors/OL1234A/books").json()
         rels = {l["rel"] for l in data.get("links", [])}
         assert "first" in rels
 
@@ -1026,7 +1026,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=50)):
-            data = client.get("/authors/OL1234A?limit=25").json()
+            data = client.get("/authors/OL1234A/books?limit=25").json()
         rels = {l["rel"] for l in data.get("links", [])}
         assert "next" in rels
 
@@ -1034,7 +1034,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A").json()
+            data = client.get("/authors/OL1234A/books").json()
         rels = {l["rel"] for l in data.get("links", [])}
         assert "next" not in rels
 
@@ -1042,7 +1042,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=50)):
-            data = client.get("/authors/OL1234A?page=2&limit=25").json()
+            data = client.get("/authors/OL1234A/books?page=2&limit=25").json()
         rels = {l["rel"] for l in data.get("links", [])}
         assert "previous" in rels
 
@@ -1050,7 +1050,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A").json()
+            data = client.get("/authors/OL1234A/books").json()
         rels = {l["rel"] for l in data.get("links", [])}
         assert "previous" not in rels
 
@@ -1058,7 +1058,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A").json()
+            data = client.get("/authors/OL1234A/books").json()
         facet_titles = {f["metadata"]["title"] for f in data.get("facets", [])}
         assert "Availability" in facet_titles
         assert "Language" in facet_titles
@@ -1069,7 +1069,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A").json()
+            data = client.get("/authors/OL1234A/books").json()
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
         titles = {l["title"] for l in avail["links"]}
         assert "Buy" not in titles
@@ -1078,7 +1078,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A?mode=ebooks").json()
+            data = client.get("/authors/OL1234A/books?mode=ebooks").json()
         avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
         ebooks_link = next(l for l in avail["links"] if l["title"] == "Borrow")
         assert has_rel(ebooks_link, "self")
@@ -1087,7 +1087,7 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)) as mock_s:
-            client.get("/authors/OL1234A?media_type=audiobook")
+            client.get("/authors/OL1234A/books?media_type=audiobook")
         _, kwargs = mock_s.call_args
         assert kwargs.get("media_type") == "audiobook"
 
@@ -1095,12 +1095,26 @@ class TestOpdsAuthors:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A?mode=ebooks&media_type=ebook").json()
+            data = client.get("/authors/OL1234A/books?mode=ebooks&media_type=ebook").json()
         # Language facet links should carry current mode and media_type
         lang = next(f for f in data["facets"] if f["metadata"]["title"] == "Language")
         en_link = next(l for l in lang["links"] if l["title"] == "English")
         assert "mode=ebooks" in en_link["href"]
         assert "media_type=ebook" in en_link["href"]
+
+
+    def test_books_feed_facet_links_point_at_the_books_feed(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A/books?mode=ebooks").json()
+        hrefs = [l["href"] for f in data["facets"] for l in f["links"]]
+        assert hrefs and all(h.startswith("http://testserver/authors/OL1234A/books") for h in hrefs)
+
+    def test_no_books_and_no_bio_returns_404_on_the_books_feed_too(self):
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info(None, None)), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[], total=0)):
+            assert client.get("/authors/OL9999A/books").status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -1144,7 +1158,8 @@ class TestCompression:
 # ---------------------------------------------------------------------------
 
 class TestAuthorPage:
-    """The author page: portrait, bio, popular carousel and their relations."""
+    """The author page: portrait, bio, popular carousel, the entry to all the
+    author's books, and the books feed behind it."""
 
     def _get(self, path, info=None, search=None):
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=info or _author_info("Ursula K. Le Guin", "Bio")), \
@@ -1177,7 +1192,7 @@ class TestAuthorPage:
         [alt] = [l for l in resp.json()["links"] if l["rel"] == "alternate"]
         assert alt == {"rel": "alternate", "href": "https://openlibrary.org/authors/OL31353A", "type": "text/html"}
 
-    def test_popular_books_carousel_on_page_one(self):
+    def test_popular_books_carousel_links_to_the_books_feed_sorted_by_rating(self):
         from pyopds2_openlibrary import REL_SORT_POPULAR
         resp, _ = self._get("/authors/OL31353A?mode=ebooks")
         [group] = resp.json()["groups"]
@@ -1185,7 +1200,57 @@ class TestAuthorPage:
         assert group["publications"]
         [self_link] = group["links"]
         assert self_link["rel"] == ["self", REL_SORT_POPULAR]
-        assert self_link["href"] == "http://testserver/authors/OL31353A?mode=ebooks&sort=rating"
+        assert self_link["href"] == "http://testserver/authors/OL31353A/books?mode=ebooks&sort=rating"
+
+    def test_the_page_lists_no_books_itself(self):
+        resp, mock_search = self._get("/authors/OL31353A")
+        body = resp.json()
+        assert "publications" not in body
+        assert "facets" not in body
+        assert "numberOfItems" not in body["metadata"]
+        # The only search is the carousel's.
+        assert mock_search.call_count == 1
+        assert mock_search.call_args.kwargs["sort"] == "rating"
+
+    def test_navigation_entry_to_all_the_authors_books(self):
+        resp, _ = self._get("/authors/OL31353A")
+        [entry] = resp.json()["navigation"]
+        assert entry == {
+            "href": "http://testserver/authors/OL31353A/books",
+            "title": "All Ursula K. Le Guin's books",
+            "type": "application/opds+json",
+            "rel": "subsection",
+        }
+
+    def test_navigation_entry_carries_the_page_filters(self):
+        resp, _ = self._get("/authors/OL31353A?mode=ebooks&language=fr&media_type=audiobook&access=print_disabled")
+        [entry] = resp.json()["navigation"]
+        assert entry["href"] == "http://testserver/authors/OL31353A/books?mode=ebooks&language=fr&media_type=audiobook&access=print_disabled"
+        links = {l["rel"]: l["href"] for l in resp.json()["links"] if isinstance(l["rel"], str)}
+        assert links["self"] == "http://testserver/authors/OL31353A?mode=ebooks&language=fr&media_type=audiobook&access=print_disabled"
+
+    def test_navigation_entry_without_a_name(self):
+        resp, _ = self._get("/authors/OL31353A", info=_author_info(None, None))
+        body = resp.json()
+        assert body["metadata"]["title"] == "OL31353A"
+        assert body["navigation"][0]["title"] == "All books"
+
+    def test_books_feed_is_titled_all_the_authors_books_and_leads_up_to_the_page(self):
+        resp, _ = self._get("/authors/OL31353A/books?mode=ebooks")
+        body = resp.json()
+        assert body["metadata"]["title"] == "All Ursula K. Le Guin's books"
+        assert "subtitle" not in body["metadata"] and "description" not in body["metadata"]
+        assert body["publications"]
+        assert "images" not in body
+        assert "navigation" not in body
+        links = {l["rel"]: l for l in body["links"] if isinstance(l["rel"], str)}
+        assert links["up"] == {"rel": "up", "href": "http://testserver/authors/OL31353A?mode=ebooks", "type": "application/opds+json"}
+        assert "alternate" not in links
+
+    def test_books_feed_has_no_carousel(self):
+        resp, mock_search = self._get("/authors/OL31353A/books?page=2", search=lambda **kw: _make_search_response(records=[_make_record()], total=60))
+        assert "groups" not in resp.json()
+        assert mock_search.call_count == 1
 
     def test_popular_search_is_best_rated_with_the_page_filters(self):
         _, mock_search = self._get("/authors/OL31353A?mode=ebooks&language=fr")
@@ -1197,13 +1262,8 @@ class TestAuthorPage:
         assert popular[0]["language"] == "fr"
         assert popular[0]["query"] == "author_key:OL31353A"
 
-    def test_no_carousel_past_page_one(self):
-        resp, mock_search = self._get("/authors/OL31353A?page=2", search=lambda **kw: _make_search_response(records=[_make_record()], total=60))
-        assert "groups" not in resp.json()
-        assert mock_search.call_count == 1
-
-    def test_no_carousel_on_the_page_it_links_to(self):
-        resp, mock_search = self._get("/authors/OL31353A?sort=rating")
+    def test_no_carousel_on_the_feed_it_links_to(self):
+        resp, mock_search = self._get("/authors/OL31353A/books?sort=rating")
         assert "groups" not in resp.json()
         assert mock_search.call_count == 1
 
@@ -1214,7 +1274,7 @@ class TestAuthorPage:
             return _make_search_response(records=[_make_record()], total=1)
         resp, _ = self._get("/authors/OL31353A", search=search)
         assert "groups" not in resp.json()
-        assert resp.json()["publications"]
+        assert resp.json()["navigation"][0]["title"] == "All Ursula K. Le Guin's books"
 
     def test_failed_popular_search_does_not_fail_the_page(self):
         def search(**kw):
@@ -1226,22 +1286,23 @@ class TestAuthorPage:
         assert "groups" not in resp.json()
 
     def test_sort_is_forwarded_and_kept_in_the_page_links(self):
-        resp, mock_search = self._get("/authors/OL31353A?sort=title", search=lambda **kw: _make_search_response(records=[_make_record()], total=60))
+        resp, mock_search = self._get("/authors/OL31353A/books?sort=title", search=lambda **kw: _make_search_response(records=[_make_record()], total=60))
         assert mock_search.call_args.kwargs["sort"] == "title"
         links = {l["rel"]: l["href"] for l in resp.json()["links"] if isinstance(l["rel"], str)}
-        assert links["self"].endswith("/authors/OL31353A?sort=title")
-        assert links["next"].endswith("/authors/OL31353A?page=2&sort=title")
+        assert links["self"].endswith("/authors/OL31353A/books?sort=title")
+        assert links["next"].endswith("/authors/OL31353A/books?page=2&sort=title")
 
     def test_unknown_sort_is_rejected(self):
-        resp, _ = self._get("/authors/OL31353A?sort=bogus")
+        resp, _ = self._get("/authors/OL31353A/books?sort=bogus")
         assert resp.status_code == 422
 
     def test_sort_reaches_the_facets(self):
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("A")), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[_make_record()], total=1)), \
              patch("app.routes.opds.OpenLibraryDataProvider.build_author_facets", return_value=[]) as facets:
-            client.get("/authors/OL31353A?sort=title")
+            client.get("/authors/OL31353A/books?sort=title")
         assert facets.call_args.kwargs["sort"] == "title"
+        assert facets.call_args.kwargs["path"] == "/authors/OL31353A/books"
 
     def test_cache_keys_tell_sorts_apart_and_store_the_info(self):
         keys = []
@@ -1253,9 +1314,11 @@ class TestAuthorPage:
 
         fastapi_app.dependency_overrides[get_cache] = RecordingCache
         self._get("/authors/OL31353A")
-        self._get("/authors/OL31353A?sort=title")
+        self._get("/authors/OL31353A/books")
+        self._get("/authors/OL31353A/books?sort=title")
         catalog_keys = [k for k in keys if k.startswith("opds:author_catalog:")]
         assert len(set(catalog_keys)) == 2
+        assert sum(k.startswith("opds:author_page:") for k in keys) == 1
         assert any(k.startswith("opds:author_info:") for k in keys)
 
 
@@ -1554,7 +1617,7 @@ class TestAccessFilter:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A?access=print_disabled&mode=ebooks").json()
+            data = client.get("/authors/OL1234A/books?access=print_disabled&mode=ebooks").json()
         access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Access")
         pd_link = next(l for l in access_facet["links"] if l["title"] == "Print Disabled")
         assert "access=print_disabled" in pd_link["href"]
@@ -2191,7 +2254,7 @@ class TestLanguageList:
 
     def test_author_links_carry_the_list(self, mock_single_record):
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)):
-            data = client.get("/authors/OL1234A?language=en,fr&page=2").json()
+            data = client.get("/authors/OL1234A/books?language=en,fr&page=2").json()
         by_rel = {l["rel"]: unquote_plus(l["href"]) for l in data["links"] if isinstance(l.get("rel"), str)}
         for rel in ("self", "first", "previous"):
             assert "language=en,fr" in by_rel[rel], rel
@@ -2274,7 +2337,7 @@ class TestLinkRels:
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
-            data = client.get("/authors/OL1234A?mode=ebooks").json()
+            data = client.get("/authors/OL1234A/books?mode=ebooks").json()
         _assert_facet_rels(data["facets"])
 
     def test_the_rels_do_not_follow_the_base_url(self, mock_empty_search):

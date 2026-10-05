@@ -37,7 +37,8 @@ Interactive docs: `/docs` (Swagger UI) · `/redoc`
 |---|---|
 | `GET /` | `mode`, `language`, `page`, `media_type`, `access`, `limit` |
 | `GET /search` | `query`, `limit`, `page`, `sort`, `mode`, `title`, `language`, `media_type`, `access` |
-| `GET /authors/{olid}` | `page`, `limit`, `mode`, `language`, `media_type`, `access`, `sort` |
+| `GET /authors/{olid}` | `mode`, `language`, `media_type`, `access`: the page about an author |
+| `GET /authors/{olid}/books` | `page`, `limit`, `mode`, `language`, `media_type`, `access`, `sort`: all their books |
 | `GET /books/{olid}` | none |
 | `GET /rel/{relation}` | none: the HTML page a link relation the feed coins resolves to |
 
@@ -64,17 +65,21 @@ option as `["self", <relation>]`:
 
 The Trending Books carousel's `self` link, and the Popular Books
 carousel's on an author page, also carry the registered
-`http://opds-spec.org/sort/popular`. An author page links to the author's
-openlibrary.org page as `alternate`, every book's author contributor links
-to both the HTML page and the author page with `rel` `author`, and the
-author's photo is a feed-level `images` entry carrying
-`https://openlibrary.org/opds/rel/portrait`. The author feed carries two texts
-about the author: `metadata.subtitle` is the one-line summary shown under
-the portrait on openlibrary.org, the author's Wikidata description, looked
-up in a table shipped with the app (see
-[Author descriptions](#author-descriptions)), never fetched per page; and
-`metadata.description` is the full biography from the Open Library author
-record. The feed's own relations are extension
+`http://opds-spec.org/sort/popular`. An author page, `/authors/{olid}`, is
+the page about the author, not the list of their books: it links to the
+author's openlibrary.org page as `alternate`, carries the author's photo as
+a feed-level `images` entry with `https://openlibrary.org/opds/rel/portrait`,
+two texts about the author (`metadata.subtitle`, the one-line summary shown
+under the portrait on openlibrary.org, the author's Wikidata description,
+looked up in a table shipped with the app, see
+[Author descriptions](#author-descriptions), never fetched per page; and
+`metadata.description`, the full biography from the Open Library author
+record), the Popular Books carousel, and one `navigation` entry, "All X's
+books", with the registered `subsection` relation, leading to
+`/authors/{olid}/books`: the paginated, faceted, sortable feed of all the
+author's books, whose `up` link leads back to the page. Every book's author
+contributor links to both the HTML page and the author page with `rel`
+`author`. The feed's own relations are extension
 relations (RFC 8288): fixed strings, the same on every deployment, that
 resolve to [app/docs/link-relations.md](app/docs/link-relations.md), served
 at `/rel/…`. Check a `rel` for membership, not equality: `has_rel` in
