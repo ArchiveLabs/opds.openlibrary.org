@@ -75,12 +75,15 @@ documented here.
 ## Author pages
 
 An author page, `/authors/<olid>`, is the feed of an author's books. Its
-`metadata.title` is the author's name and `metadata.description` the
-one-line summary openlibrary.org shows under their portrait (the English
+`metadata.title` is the author's name, `metadata.subtitle` the one-line
+summary openlibrary.org shows under their portrait (the English
 description of the author's Wikidata item, e.g. "French philosopher,
-author, and journalist (1913–1960)"), both as OPDS 2.0's feed metadata
-allows. The full biography is not carried, and an author without a
-Wikidata description has no description. The feed's `links`
+author, and journalist (1913–1960)") and `metadata.description` their
+full biography from the Open Library author record, all three fields of
+the Readium Web Publication Manifest metadata that OPDS 2.0's feed
+metadata reuses. Either text is absent when its source has none: an
+author without a Wikidata description has no subtitle, one without a
+biography no description. The feed's `links`
 carry `alternate` to the author's page on openlibrary.org, and every book's
 author contributor links to the page twice with `rel` `author`: the HTML
 page as `text/html`, this feed as `application/opds+json`. Its first page

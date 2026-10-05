@@ -68,11 +68,13 @@ carousel's on an author page, also carry the registered
 openlibrary.org page as `alternate`, every book's author contributor links
 to both the HTML page and the author page with `rel` `author`, and the
 author's photo is a feed-level `images` entry carrying
-`https://openlibrary.org/opds/rel/portrait`. The author feed's `metadata.description`
-is the one-line summary shown under the portrait on openlibrary.org, the
-author's Wikidata description, not the full biography; it is looked up in
-a table shipped with the app (see [Author descriptions](#author-descriptions)),
-never fetched per page. The feed's own relations are extension
+`https://openlibrary.org/opds/rel/portrait`. The author feed carries two texts
+about the author: `metadata.subtitle` is the one-line summary shown under
+the portrait on openlibrary.org, the author's Wikidata description, looked
+up in a table shipped with the app (see
+[Author descriptions](#author-descriptions)), never fetched per page; and
+`metadata.description` is the full biography from the Open Library author
+record. The feed's own relations are extension
 relations (RFC 8288): fixed strings, the same on every deployment, that
 resolve to [app/docs/link-relations.md](app/docs/link-relations.md), served
 at `/rel/…`. Check a `rel` for membership, not equality: `has_rel` in
@@ -200,8 +202,9 @@ Run them manually before opening a PR or after deploying to any environment.
 
 ## Author descriptions
 
-The one-line summary on an author page is the English description of the
-author's Wikidata item, which no Open Library API carries. Rather than ask
+The one-line summary on an author page, the feed's `metadata.subtitle`, is
+the English description of the author's Wikidata item, which no Open
+Library API carries. Rather than ask
 wikidata.org on every author page, the service ships the whole table:
 `app/data/author_descriptions.tsv.gz`, one `OLID<TAB>description` line per
 author, about 245,000 rows and 3 MB gzipped, read into memory once per
