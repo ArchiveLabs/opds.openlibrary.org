@@ -74,7 +74,7 @@ documented here.
 
 ## Author pages
 
-An author page, `/authors/<olid>`, is the feed of an author's books. Its
+An author page, `/authors/<olid>`, is the feed about an author. Its
 `metadata.title` is the author's name, `metadata.subtitle` the one-line
 summary openlibrary.org shows under their portrait (the English
 description of the author's Wikidata item, e.g. "French philosopher,
@@ -83,12 +83,19 @@ full biography from the Open Library author record, all three fields of
 the Readium Web Publication Manifest metadata that OPDS 2.0's feed
 metadata reuses. Either text is absent when its source has none: an
 author without a Wikidata description has no subtitle, one without a
-biography no description. The feed's `links`
-carry `alternate` to the author's page on openlibrary.org, and every book's
-author contributor links to the page twice with `rel` `author`: the HTML
-page as `text/html`, this feed as `application/opds+json`. Its first page
-in default order has the Popular Books carousel, the author's best-rated
-books, whose self link is the same page with `sort=rating`.
+biography no description. The feed's `links` carry `alternate` to the
+author's page on openlibrary.org, and every book's author contributor
+links to the page twice with `rel` `author`: the HTML page as
+`text/html`, this feed as `application/opds+json`. The page has the
+Popular Books carousel, the author's best-rated books, and lists no
+books itself: its one `navigation` entry, titled "All <name>'s books"
+and carrying the registered relation `subsection`, leads to
+`/authors/<olid>/books`, the paginated feed of all the author's books
+with its facets and sorts. The carousel's self link is that feed with
+`sort=rating`, and the feed's `up` link (also registered) leads back to
+the author page. Filters given to the page (`mode`, `language`,
+`media_type`, `access`) narrow the carousel and are carried into both
+links.
 
 ### portrait
 

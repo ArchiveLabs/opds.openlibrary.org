@@ -140,7 +140,7 @@ def _has_rel(link: dict, rel: str) -> bool:
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize("path", ["/search?query=tolkien&mode=ebooks", "/?media_type=ebook", "/authors/OL23919A"])
+@pytest.mark.parametrize("path", ["/search?query=tolkien&mode=ebooks", "/?media_type=ebook", "/authors/OL23919A/books"])
 def test_facet_links_carry_their_group_rel(client: httpx.Client, path: str) -> None:
     """Every option link of a facet group carries the group's relation, the
     applied option ["self", <relation>] — what a client selects facets by."""
@@ -289,17 +289,41 @@ def test_author_page_has_portrait_bio_and_popular_books(client: httpx.Client) ->
     assert group["publications"]
     [self_link] = group["links"]
     assert self_link["rel"] == ["self", "http://opds-spec.org/sort/popular"]
-    assert self_link["href"].endswith("/authors/OL31353A?sort=rating")
+    assert self_link["href"].endswith("/authors/OL31353A/books?sort=rating")
+    # The list of all her books is its own feed, reached by navigation.
+    assert "publications" not in body
+    [entry] = body["navigation"]
+    assert entry["title"] == "All Ursula K. Le Guin's books"
+    assert entry["rel"] == "subsection"
+    assert entry["href"].endswith("/authors/OL31353A/books")
+
+
+@pytest.mark.e2e
+def test_author_books_feed_lists_the_books_with_facets(client: httpx.Client) -> None:
+    r = client.get("/authors/OL31353A/books")
+    assert r.status_code == 200, r.text[:200]
+    body = r.json()
+    assert body["metadata"]["title"] == "All Ursula K. Le Guin's books"
+    assert body["metadata"]["numberOfItems"] > 25
+    # A page asks Solr for 25 rows; the provider keeps only the works it
+    # can offer, so the page is short, never longer.
+    assert 0 < len(body["publications"]) <= 25
+    assert "groups" not in body
+    assert {f["metadata"]["title"] for f in body["facets"]} >= {"Availability", "Language", "Media Type", "Access"}
+    assert all(l["href"].split("?")[0].endswith("/authors/OL31353A/books") for f in body["facets"] for l in f["links"])
+    links = {l["rel"]: l["href"] for l in body["links"] if isinstance(l["rel"], str)}
+    assert links["up"].endswith("/authors/OL31353A")
+    assert links["next"].endswith("/authors/OL31353A/books?page=2")
     author = body["publications"][0]["metadata"]["author"][0]
     assert all(l["rel"] == "author" for l in author["links"])
 
 
 @pytest.mark.e2e
-def test_author_page_sorted_by_rating_has_no_carousel(client: httpx.Client) -> None:
-    r = client.get("/authors/OL31353A?sort=rating")
+def test_author_books_sorted_by_rating_has_no_carousel(client: httpx.Client) -> None:
+    r = client.get("/authors/OL31353A/books?sort=rating")
     assert r.status_code == 200
     assert "groups" not in r.json()
-    assert client.get("/authors/OL31353A?sort=bogus").status_code == 422
+    assert client.get("/authors/OL31353A/books?sort=bogus").status_code == 422
 
 
 @pytest.mark.e2e
