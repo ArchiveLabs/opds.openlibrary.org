@@ -61,7 +61,7 @@ from app.config import (
 import sentry_sdk
 
 from app.author_descriptions import author_description
-from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
+from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError, WorkNotFound
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -132,11 +132,17 @@ def opds_pub_response(data: dict) -> JSONResponse:
 
 
 def _search(provider: OpenLibraryDataProvider, **kwargs):
+    logger.info("search query=%r limit=%s offset=%s sort=%s",
+                kwargs.get("query"), kwargs.get("limit"),
+                kwargs.get("offset", 0), kwargs.get("sort"))
+    return _call_upstream(provider.search, **kwargs)
+
+
+def _call_upstream(func, **kwargs):
+    """Call a provider method, turning what Open Library does to us into an
+    ``UpstreamError`` the app answers with."""
     try:
-        logger.info("search query=%r limit=%s offset=%s sort=%s",
-                    kwargs.get("query"), kwargs.get("limit"),
-                    kwargs.get("offset", 0), kwargs.get("sort"))
-        return _call_provider_compat(provider.search, **kwargs)
+        return _call_provider_compat(func, **kwargs)
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code
         if status_code == 429:
@@ -399,7 +405,39 @@ async def opds_books(
         if not resp.records:
             logger.warning("edition not found: %s", edition_olid)
             raise EditionNotFound(edition_olid)
-        return resp.records[0].to_publication().model_dump()
+        return resp.records[0].to_edition_publication().model_dump()
+
+    data = await cache.cached(key, TTL_BOOK_SECONDS, _fetch)
+    return opds_pub_response(data)
+
+
+@router.get("/works/{work_olid}", summary="OPDS 2.0 work: its editions as alternates")
+async def opds_works(
+    request: Request,
+    work_olid: str,
+    language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 codes, the preferred one first: only editions in these languages are listed. Omit for all languages."),
+    access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
+    cache: CacheBackend = Depends(get_cache),
+):
+    """The work as an OPDS publication whose ``rel=alternate`` links of the
+    publication type are its editions, best offer first, each with a hint of
+    what it is under ``properties.edition``. The self link echoes ``language``:
+    the list depends on it, so it names the document."""
+    logger.info("GET /works/%s language=%s access=%s", work_olid, language, access)
+    base = _base_url(request)
+    provider = get_provider(base)
+    language = canonical_language(language)
+
+    key = make_key("work", {"work_olid": work_olid, "language": language or "", "access": access or ""})
+
+    async def _fetch() -> dict:
+        publication = await asyncio.to_thread(
+            _call_upstream, provider.work, work_olid=work_olid, language=language, access=access,
+        )
+        if publication is None:
+            logger.warning("work not found or nothing to list: %s", work_olid)
+            raise WorkNotFound(work_olid)
+        return publication.model_dump()
 
     data = await cache.cached(key, TTL_BOOK_SECONDS, _fetch)
     return opds_pub_response(data)

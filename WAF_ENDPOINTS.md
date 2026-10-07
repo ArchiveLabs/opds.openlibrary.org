@@ -16,6 +16,7 @@ matches nothing.
 | Homepage | GET | `^/(\?.*)?$` |
 | Search | GET | `^/search(\?.*)?$` |
 | Single Edition | GET | `^/books/OL[0-9]+M$` |
+| Work (its editions) | GET | `^/works/OL[0-9]+W(\?.*)?$` |
 | Author Catalog | GET | `^/authors/OL[0-9]+A(\?.*)?$` |
 | Link relation docs | GET | `^/rel(/[a-z0-9/-]*)?$` |
 | Health Check | GET | `^/health$` |
@@ -26,7 +27,7 @@ matches nothing.
 ## Combined Allow-List
 
 ```
-^/(\?.*|search(\?.*)?|books/OL[0-9]+M|authors/OL[0-9]+A(\?.*)?|rel(/[a-z0-9/-]*)?|health|sw\.js|icloud/asset(\?.*)?|icloud/relay-status)?$
+^/(\?.*|search(\?.*)?|books/OL[0-9]+M|works/OL[0-9]+W(\?.*)?|authors/OL[0-9]+A(\?.*)?|rel(/[a-z0-9/-]*)?|health|sw\.js|icloud/asset(\?.*)?|icloud/relay-status)?$
 ```
 
 ## Notes
