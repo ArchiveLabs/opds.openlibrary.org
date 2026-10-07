@@ -6,6 +6,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# io0 auto-injects HTTP_PROXY/HTTPS_PROXY into the container. httpx (used by
+# pyopds2_openlibrary with trust_env=True) would route our upstream calls to
+# openlibrary.org through that auth-requiring proxy and get a 407. Append the
+# Archive hosts to NO_PROXY so httpx bypasses the proxy for them. We *append*
+# rather than overwrite so any proxy exceptions injected by the platform are
+# preserved.
+_NO_PROXY_HOSTS = "openlibrary.org,.openlibrary.org,archive.org,.archive.org"
+for _var in ("NO_PROXY", "no_proxy"):
+    _existing = os.environ.get(_var, "").strip()
+    os.environ[_var] = f"{_existing},{_NO_PROXY_HOSTS}" if _existing else _NO_PROXY_HOSTS
+
 OPDS_MEDIA_TYPE = "application/opds+json"
 OPDS_PUB_MEDIA_TYPE = "application/opds-publication+json"
 
