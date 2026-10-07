@@ -3,7 +3,6 @@ from __future__ import annotations
 __all__ = [
     "OPDSException",
     "EditionNotFound",
-    "WorkNotFound",
     "AuthorNotFound",
     "UpstreamError",
 ]
@@ -17,13 +16,6 @@ class EditionNotFound(OPDSException):
     def __init__(self, edition_olid: str):
         self.edition_olid = edition_olid
         super().__init__(f"Edition not found: {edition_olid}")
-
-
-class WorkNotFound(OPDSException):
-    """No such work, or one with no edition to list for the reader."""
-    def __init__(self, work_olid: str):
-        self.work_olid = work_olid
-        super().__init__(f"Work not found: {work_olid}")
 
 
 class AuthorNotFound(OPDSException):

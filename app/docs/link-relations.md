@@ -107,31 +107,3 @@ and this relation on an entry says the image is the person's portrait
 rather than a cover or a banner. On an author page it is the author's photo
 at `https://covers.openlibrary.org/a/id/<photo>-L.jpg`, with `width` and
 `height` the pixel size of that file when it is known.
-
-## Link properties
-
-A link's `properties` object is open for extension (Readium Web Publication
-Manifest, link schema), and OPDS hangs `price`, `availability`,
-`indirectAcquisition` and `authenticate` there. This feed adds one.
-
-### edition
-
-On a work's `rel="alternate"` link of type `application/opds-publication+json`
-— one per edition of the work, best offer first — `properties.edition` is a
-hint of what the link points at, so a client can list the editions without
-fetching any of them. The document behind the link is the truth; the hint
-is a summary of it, and may say less.
-
-| Field | Meaning |
-|---|---|
-| `key` | The Open Library edition, `OL…M` |
-| `@type` | `http://schema.org/Book` or `http://schema.org/Audiobook` |
-| `author` | The work's author names |
-| `published` | The year the printing came out, as an ISO date: `2010-01-01` |
-| `language` | ISO 639-1 codes |
-| `cover` | An image link: `href`, `type`, `width`, `height` (the `-M` rendition) |
-| `distributor` | Who makes the offer, as a reader would read it: `Internet Archive`, `Standard Ebooks`, … |
-| `offer` | `rel`, one of `http://opds-spec.org/acquisition/open-access`, `…/borrow`, `…/buy`; with OPDS's own `price` (`{value, currency}`) for a sale and `availability` (`{state}`) for a loan when known |
-
-Every field but `offer` may be absent. A client that does not know the
-property fetches the link, as it would any other.
