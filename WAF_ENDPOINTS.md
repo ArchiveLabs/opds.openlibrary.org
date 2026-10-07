@@ -16,7 +16,7 @@ matches nothing.
 | Homepage | GET | `^/(\?.*)?$` |
 | Search | GET | `^/search(\?.*)?$` |
 | Single Edition | GET | `^/books/OL[0-9]+M$` |
-| Work (its editions) | GET | `^/works/OL[0-9]+W(\?.*)?$` |
+| Work (its editions) | GET | `^/works/OL[0-9]+W(\?.*)?$` — until it is live, works are served at `/search?work=OL…W` (see `_works_via_search` in `app/routes/opds.py`) |
 | Author Catalog | GET | `^/authors/OL[0-9]+A(\?.*)?$` |
 | Link relation docs | GET | `^/rel(/[a-z0-9/-]*)?$` |
 | Health Check | GET | `^/health$` |

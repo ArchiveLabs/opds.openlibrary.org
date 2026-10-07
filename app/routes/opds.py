@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 import asyncio
+import re
 import inspect
 
 import httpx
@@ -124,11 +125,53 @@ def get_provider(base: str) -> OpenLibraryDataProvider:
 
 
 def opds_response(data: dict) -> JSONResponse:
-    return JSONResponse(content=data, media_type=OPDS_MEDIA_TYPE)
+    return JSONResponse(content=_works_via_search(data), media_type=OPDS_MEDIA_TYPE)
 
 
 def opds_pub_response(data: dict) -> JSONResponse:
-    return JSONResponse(content=data, media_type=OPDS_PUB_MEDIA_TYPE)
+    return JSONResponse(content=_works_via_search(data), media_type=OPDS_PUB_MEDIA_TYPE)
+
+
+# ---------------------------------------------------------------------------
+# TEMPORARY: works are served at /search?work=OL…W until the WAF admits
+# /works/OL…W. Revert this commit once the allow-list has it.
+#
+# The WAF allow-list (WAF_ENDPOINTS.md) does not have /works/ yet, and
+# /search is the one listed route that takes any query. So every work link
+# this feed writes is rewritten on the way out, from /works/OL…W?<query> to
+# /search?work=OL…W&<query>, and /search answers a `work` parameter with the
+# work. The cache keeps the /works/ spelling; only responses change.
+#
+# Reverting is not quite deleting: clients persist these hrefs (a book on a
+# reader's Want to Read list keeps the self it was saved with). After the
+# revert, keep /search?work= answering — or redirecting to /works/ — until
+# those have aged out.
+# ---------------------------------------------------------------------------
+
+_WORK_HREF = re.compile(r"^/works/(OL[0-9]+W)(?:\?(.*))?$")
+
+
+def _works_via_search(data):
+    """The response with every work href of this feed spelled under /search."""
+    base = (OpenLibraryDataProvider.OPDS_BASE_URL or "").rstrip("/")
+    if not base:
+        return data
+
+    def rewrite(node):
+        if isinstance(node, dict):
+            out = {k: rewrite(v) for k, v in node.items()}
+            href = out.get("href")
+            if isinstance(href, str) and href.startswith(base + "/works/"):
+                match = _WORK_HREF.match(href[len(base):])
+                if match:
+                    olid, query = match.groups()
+                    out["href"] = f"{base}/search?work={olid}" + (f"&{query}" if query else "")
+            return out
+        if isinstance(node, list):
+            return [rewrite(item) for item in node]
+        return node
+
+    return rewrite(data)
 
 
 def _search(provider: OpenLibraryDataProvider, **kwargs):
@@ -323,8 +366,15 @@ async def opds_search(
     language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
     media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
+    work: Optional[str] = Query(default=None, description="TEMPORARY: a work, OL…W, answered as GET /works/{olid} would be, until the WAF admits /works/."),
     cache: CacheBackend = Depends(get_cache),
 ):
+    if work is not None:
+        # TEMPORARY (see _works_via_search): the other parameters a client's
+        # filter adds to a /search URL (mode, media_type) say nothing to a work.
+        if not re.fullmatch(r"OL[0-9]+W", work):
+            raise WorkNotFound(work)
+        return await opds_works(request, work, language=language, access=access, cache=cache)
     logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s language=%s media_type=%s access=%s", query, limit, page, sort, mode, language, media_type, access)
     base = _base_url(request)
     provider = get_provider(base)

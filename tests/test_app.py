@@ -445,7 +445,8 @@ class TestOpdsSearch:
         )
         assert pub_self["href"].startswith("https://myopds.example.com/")
         # A publication in a feed is the work; its editions are its alternates.
-        assert "/works/OL1W" in pub_self["href"]
+        # (Under /search?work= while the WAF lacks /works/; see _works_via_search.)
+        assert "work=OL1W" in pub_self["href"]
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +518,62 @@ class TestOpdsWorks:
         assert allow.match("/works/OL60149W?language=en,fr")
         assert not allow.match("/works/OL60149W/editions")
         assert allow.match("/books/OL1M")
+
+
+class TestWorksViaSearch:
+    """TEMPORARY, reverted with the commit that added it: works served at
+    /search?work=OL…W until the WAF admits /works/."""
+
+    WORK_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.work"
+
+    def test_search_with_work_answers_the_work(self):
+        with patch(self.WORK_PATCH_TARGET, return_value=TestOpdsWorks._work_publication()) as work:
+            resp = client.get("/search?work=OL60149W&language=en,fr&mode=ebooks&access=print_disabled")
+        assert resp.status_code == 200
+        assert "application/opds-publication+json" in resp.headers["content-type"]
+        assert work.call_args.kwargs == {"work_olid": "OL60149W", "language": "en,fr", "access": "print_disabled"}
+
+    def test_a_malformed_work_is_404_and_reaches_nothing(self):
+        with patch(self.WORK_PATCH_TARGET) as work:
+            assert client.get("/search?work=OL1M").status_code == 404
+        work.assert_not_called()
+
+    def test_work_hrefs_are_written_under_search_and_nothing_else_is(self):
+        with patch(self.WORK_PATCH_TARGET, return_value=TestOpdsWorks._work_publication()):
+            with patch("app.routes.opds.OPDS_BASE_URL", "https://openlibrary.org/opds"):
+                data = client.get("/works/OL60149W?language=en,fr").json()
+        self_link = next(l for l in data["links"] if l["rel"] == "self")
+        assert self_link["href"] == "https://openlibrary.org/opds/search?work=OL60149W&language=en,fr"
+        edition = next(l for l in data["links"] if l["rel"] == "alternate")
+        assert edition["href"] == "https://openlibrary.org/opds/books/OL1M"
+
+    def test_the_rewrite_spares_the_html_work_page_and_other_hosts(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as OLP
+
+        with patch.object(OLP, "OPDS_BASE_URL", "https://openlibrary.org/opds"):
+            out = opds_module._works_via_search({"links": [
+                {"href": "https://openlibrary.org/works/OL1W", "type": "text/html"},
+                {"href": "https://openlibrary.org/opds/works/OL1W"},
+                {"href": "https://elsewhere.org/opds/works/OL1W"},
+                {"href": "https://openlibrary.org/opds/works/OL1W/editions"},
+            ]})
+        assert [l["href"] for l in out["links"]] == [
+            "https://openlibrary.org/works/OL1W",
+            "https://openlibrary.org/opds/search?work=OL1W",
+            "https://elsewhere.org/opds/works/OL1W",
+            "https://openlibrary.org/opds/works/OL1W/editions",
+        ]
+
+    def test_feed_publications_link_to_the_work_under_search(self):
+        from pyopds2_openlibrary import OpenLibraryDataProvider as OLP
+
+        record = _make_record()
+        with patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            with patch("app.routes.opds.OPDS_BASE_URL", "https://myopds.example.com"):
+                with patch.object(OLP, "BASE_URL", "https://myopds.example.com"):
+                    data = client.get("/search?query=test").json()
+        pub_self = next(l for l in data["publications"][0]["links"] if l["rel"] == "self")
+        assert pub_self["href"] == "https://myopds.example.com/search?work=OL1W"
 
 
 # ---------------------------------------------------------------------------
