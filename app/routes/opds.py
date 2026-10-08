@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 import asyncio
+import re
 import inspect
 
 import httpx
@@ -61,7 +62,7 @@ from app.config import (
 import sentry_sdk
 
 from app.author_descriptions import author_description
-from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError
+from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError, WorkNotFound
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -124,19 +125,67 @@ def get_provider(base: str) -> OpenLibraryDataProvider:
 
 
 def opds_response(data: dict) -> JSONResponse:
-    return JSONResponse(content=data, media_type=OPDS_MEDIA_TYPE)
+    return JSONResponse(content=_works_via_search(data), media_type=OPDS_MEDIA_TYPE)
 
 
 def opds_pub_response(data: dict) -> JSONResponse:
-    return JSONResponse(content=data, media_type=OPDS_PUB_MEDIA_TYPE)
+    return JSONResponse(content=_works_via_search(data), media_type=OPDS_PUB_MEDIA_TYPE)
+
+
+# ---------------------------------------------------------------------------
+# TEMPORARY: works are served at /search?work=OL…W until the WAF admits
+# /works/OL…W. Revert this commit once the allow-list has it.
+#
+# The WAF allow-list (WAF_ENDPOINTS.md) does not have /works/ yet, and
+# /search is the one listed route that takes any query. So every work link
+# this feed writes is rewritten on the way out, from /works/OL…W?<query> to
+# /search?work=OL…W&<query>, and /search answers a `work` parameter with the
+# work. The cache keeps the /works/ spelling; only responses change.
+#
+# Reverting is not quite deleting: clients persist these hrefs (a book on a
+# reader's Want to Read list keeps the self it was saved with). After the
+# revert, keep /search?work= answering — or redirecting to /works/ — until
+# those have aged out.
+# ---------------------------------------------------------------------------
+
+_WORK_HREF = re.compile(r"^/works/(OL[0-9]+W)(?:\?(.*))?$")
+
+
+def _works_via_search(data):
+    """The response with every work href of this feed spelled under /search."""
+    base = (OpenLibraryDataProvider.OPDS_BASE_URL or "").rstrip("/")
+    if not base:
+        return data
+
+    def rewrite(node):
+        if isinstance(node, dict):
+            out = {k: rewrite(v) for k, v in node.items()}
+            href = out.get("href")
+            if isinstance(href, str) and href.startswith(base + "/works/"):
+                match = _WORK_HREF.match(href[len(base):])
+                if match:
+                    olid, query = match.groups()
+                    out["href"] = f"{base}/search?work={olid}" + (f"&{query}" if query else "")
+            return out
+        if isinstance(node, list):
+            return [rewrite(item) for item in node]
+        return node
+
+    return rewrite(data)
 
 
 def _search(provider: OpenLibraryDataProvider, **kwargs):
+    logger.info("search query=%r limit=%s offset=%s sort=%s",
+                kwargs.get("query"), kwargs.get("limit"),
+                kwargs.get("offset", 0), kwargs.get("sort"))
+    return _call_upstream(provider.search, **kwargs)
+
+
+def _call_upstream(func, **kwargs):
+    """Call a provider method, turning what Open Library does to us into an
+    ``UpstreamError`` the app answers with."""
     try:
-        logger.info("search query=%r limit=%s offset=%s sort=%s",
-                    kwargs.get("query"), kwargs.get("limit"),
-                    kwargs.get("offset", 0), kwargs.get("sort"))
-        return _call_provider_compat(provider.search, **kwargs)
+        return _call_provider_compat(func, **kwargs)
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code
         if status_code == 429:
@@ -317,8 +366,15 @@ async def opds_search(
     language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
     media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
+    work: Optional[str] = Query(default=None, description="TEMPORARY: a work, OL…W, answered as GET /works/{olid} would be, until the WAF admits /works/."),
     cache: CacheBackend = Depends(get_cache),
 ):
+    if work is not None:
+        # TEMPORARY (see _works_via_search): the other parameters a client's
+        # filter adds to a /search URL (mode, media_type) say nothing to a work.
+        if not re.fullmatch(r"OL[0-9]+W", work):
+            raise WorkNotFound(work)
+        return await opds_works(request, work, language=language, access=access, cache=cache)
     logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s language=%s media_type=%s access=%s", query, limit, page, sort, mode, language, media_type, access)
     base = _base_url(request)
     provider = get_provider(base)
@@ -399,7 +455,39 @@ async def opds_books(
         if not resp.records:
             logger.warning("edition not found: %s", edition_olid)
             raise EditionNotFound(edition_olid)
-        return resp.records[0].to_publication().model_dump()
+        return resp.records[0].to_edition_publication().model_dump()
+
+    data = await cache.cached(key, TTL_BOOK_SECONDS, _fetch)
+    return opds_pub_response(data)
+
+
+@router.get("/works/{work_olid}", summary="OPDS 2.0 work: its editions as alternates")
+async def opds_works(
+    request: Request,
+    work_olid: str,
+    language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 codes, the preferred one first: only editions in these languages are listed. Omit for all languages."),
+    access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
+    cache: CacheBackend = Depends(get_cache),
+):
+    """The work as an OPDS publication whose ``rel=alternate`` links of the
+    publication type are its editions, best offer first, each with a hint of
+    what it is under ``properties.edition``. The self link echoes ``language``:
+    the list depends on it, so it names the document."""
+    logger.info("GET /works/%s language=%s access=%s", work_olid, language, access)
+    base = _base_url(request)
+    provider = get_provider(base)
+    language = canonical_language(language)
+
+    key = make_key("work", {"work_olid": work_olid, "language": language or "", "access": access or ""})
+
+    async def _fetch() -> dict:
+        publication = await asyncio.to_thread(
+            _call_upstream, provider.work, work_olid=work_olid, language=language, access=access,
+        )
+        if publication is None:
+            logger.warning("work not found or nothing to list: %s", work_olid)
+            raise WorkNotFound(work_olid)
+        return publication.model_dump()
 
     data = await cache.cached(key, TTL_BOOK_SECONDS, _fetch)
     return opds_pub_response(data)

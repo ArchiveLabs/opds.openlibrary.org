@@ -39,7 +39,8 @@ Interactive docs: `/docs` (Swagger UI) · `/redoc`
 | `GET /search` | `query`, `limit`, `page`, `sort`, `mode`, `title`, `language`, `media_type`, `access` |
 | `GET /authors/{olid}` | `mode`, `language`, `media_type`, `access`: the page about an author |
 | `GET /authors/{olid}/books` | `page`, `limit`, `mode`, `language`, `media_type`, `access`, `sort`: all their books |
-| `GET /books/{olid}` | none |
+| `GET /works/{olid}` | `language`, `access`: the work, its editions as `rel=alternate` publications, best offer first |
+| `GET /books/{olid}` | none: one edition, the document a work's alternate points at when the Archive does not hold it |
 | `GET /rel/{relation}` | none: the HTML page a link relation the feed coins resolves to |
 
 `language` is a comma-separated list of ISO 639-1 codes, the reader's
@@ -48,6 +49,21 @@ and prefers English editions. A code Open Library does not know is ignored;
 with none left, no language filter applies. Every link the feed emits carries
 the list as given, and the `rel="search"` template is
 `/search{?query,language}` so a client can fill its languages in.
+
+### Works and editions
+
+A publication in a feed is a **work**: its own title, authors, description
+and rating, and under `rel="alternate"` with type
+`application/opds-publication+json` one link per **edition**, best offer
+first — free, then a loan that can be taken now, then one whose state is
+unknown, then one checked out, then for sale cheapest first. An edition the
+Internet Archive holds links straight to the Archive's document; any other
+links to `/books/{olid}` here. Each of those links carries a hint of what it
+points at under `properties.edition` (see `/rel`), so a client lists the
+editions without fetching any of them; the document behind the link is the
+truth. A feed lists the one edition Open Library surfaced; `GET /works/{olid}`
+composes the full list, one Open Library call per language and access tier,
+and its `self` echoes `language` because the list depends on it.
 
 ### Link relations
 
