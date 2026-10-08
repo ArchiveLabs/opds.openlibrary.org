@@ -2,8 +2,11 @@ FROM docker.io/library/python:3.12-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends git curl \
-  && rm -rf /var/lib/apt/lists/*
+# apt reads only lowercase http_proxy, not the HTTP_PROXY the build runner
+# sets, so point it at the proxy explicitly when there is one.
+RUN if [ -n "$HTTP_PROXY" ]; then echo "Acquire::http::Proxy \"$HTTP_PROXY\";" > /etc/apt/apt.conf.d/99proxy; fi \
+  && apt-get update && apt-get install -y --no-install-recommends git curl \
+  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99proxy
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
