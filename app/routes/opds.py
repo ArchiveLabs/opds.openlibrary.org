@@ -442,20 +442,21 @@ async def opds_search(
 async def opds_books(
     request: Request,
     edition_olid: str,
+    provider_name: Optional[str] = Query(default=None, alias="provider", description="Only this provider's acquisition links (e.g. kobo): the address a work gives the second of two offers of one printing that would otherwise share this one."),
     cache: CacheBackend = Depends(get_cache),
 ):
-    logger.info("GET /books/%s", edition_olid)
+    logger.info("GET /books/%s provider=%s", edition_olid, provider_name)
     base = _base_url(request)
     provider = get_provider(base)
 
-    key = make_key("book", {"edition_olid": edition_olid})
+    key = make_key("book", {"edition_olid": edition_olid, **({"provider": provider_name} if provider_name else {})})
 
     async def _fetch() -> dict:
         resp = await asyncio.to_thread(_search, provider, query=f"edition_key:{edition_olid}", require_cover=False)
         if not resp.records:
             logger.warning("edition not found: %s", edition_olid)
             raise EditionNotFound(edition_olid)
-        return resp.records[0].to_edition_publication().model_dump()
+        return resp.records[0].to_edition_publication(provider_name).model_dump()
 
     data = await cache.cached(key, TTL_BOOK_SECONDS, _fetch)
     return opds_pub_response(data)

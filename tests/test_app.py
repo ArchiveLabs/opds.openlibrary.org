@@ -590,6 +590,25 @@ class TestOpdsBooks:
             resp = client.get("/books/OL7353617M")
         assert resp.status_code == 200
 
+    def test_scoped_to_a_provider_it_serves_that_providers_links_alone(self):
+        from pyopds2_openlibrary import OpenLibraryDataRecord
+
+        record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL1W", "title": "Two Offers",
+            "editions": {"docs": [{"key": "/books/OL7M", "title": "Two Offers", "ebook_access": "public", "providers": [
+                {"provider_name": "standard_ebooks", "url": "https://standardebooks.org/x.epub", "format": "epub", "access": "open-access"},
+                {"provider_name": "kobo", "url": "https://kobo.example/x", "format": "web", "access": "buy", "price": "3.00 USD"},
+            ]}]},
+        })
+        with patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            whole = client.get("/books/OL7M").json()
+            scoped = client.get("/books/OL7M?provider=kobo").json()
+        hrefs = lambda doc: [l["href"] for l in doc["links"]]
+        assert "https://standardebooks.org/x.epub" in hrefs(whole)
+        assert "https://kobo.example/x" in hrefs(scoped)
+        assert "https://standardebooks.org/x.epub" not in hrefs(scoped)
+        assert next(l for l in scoped["links"] if l["rel"] == "self")["href"].endswith("/books/OL7M?provider=kobo")
+
     def test_content_type(self, mock_single_record):
         resp = client.get("/books/OL1M")
         assert "application/opds-publication+json" in resp.headers["content-type"]
