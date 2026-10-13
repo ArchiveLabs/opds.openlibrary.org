@@ -108,6 +108,26 @@ rather than a cover or a banner. On an author page it is the author's photo
 at `https://covers.openlibrary.org/a/id/<photo>-L.jpg`, with `width` and
 `height` the pixel size of that file when it is known.
 
+## Subject schemes
+
+A publication's `metadata.subject` is a list of subject objects
+([Readium Web Publication Manifest](https://readium.org/webpub-manifest/contexts/default/#subjects)),
+each with a `name` and a link to the feed of books under it. Open Library's
+subjects are free text from the catalogue record and carry no `scheme`.
+One is not.
+
+### genre
+
+`https://openlibrary.org/opds/rel/genre`
+
+The subject whose `scheme` is this URL is the work's genre: the one of the
+catalogue's genres (the front page's navigation) that the most of its
+subjects name. It comes first in the list, its `code` is the genre's key
+(`science_fiction`), and its link is that genre's feed, the same one the
+work's "Popular in" related feed points at. A work in no genre has no such
+subject. Not a link relation, but coined here all the same, so that the
+scheme a client finds can be opened.
+
 ## Link properties
 
 A link's `properties` object is open for extension (Readium Web Publication

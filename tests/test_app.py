@@ -2543,3 +2543,10 @@ class TestRelRoute:
 
     def test_a_trailing_slash_still_resolves(self):
         assert client.get("/rel/facet/access/").status_code == 200
+
+    def test_the_genre_scheme_resolves_too(self):
+        from pyopds2_openlibrary import SCHEME_GENRE
+
+        r = client.get(SCHEME_GENRE.removeprefix("https://openlibrary.org/opds"))
+        assert r.status_code == 200
+        assert 'id="genre"' in r.text
