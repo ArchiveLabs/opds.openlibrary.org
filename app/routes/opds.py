@@ -367,6 +367,7 @@ async def opds_search(
     media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
     work: Optional[str] = Query(default=None, description="TEMPORARY: a work, OL…W, answered as GET /works/{olid} would be, until the WAF admits /works/."),
+    edition: Optional[str] = Query(default=None, description="TEMPORARY, with `work`: the edition, OL…M, the work leads with."),
     cache: CacheBackend = Depends(get_cache),
 ):
     if work is not None:
@@ -374,7 +375,7 @@ async def opds_search(
         # filter adds to a /search URL (mode, media_type) say nothing to a work.
         if not re.fullmatch(r"OL[0-9]+W", work):
             raise WorkNotFound(work)
-        return await opds_works(request, work, language=language, access=access, cache=cache)
+        return await opds_works(request, work, language=language, access=access, edition=edition, cache=cache)
     logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s language=%s media_type=%s access=%s", query, limit, page, sort, mode, language, media_type, access)
     base = _base_url(request)
     provider = get_provider(base)
@@ -468,22 +469,30 @@ async def opds_works(
     work_olid: str,
     language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 codes, the preferred one first: only editions in these languages are listed. Omit for all languages."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
+    edition: Optional[str] = Query(default=None, description="The edition, OL…M, to lead with, ahead of any that ranks better. One the work does not have is ignored."),
     cache: CacheBackend = Depends(get_cache),
 ):
     """The work as an OPDS publication whose ``rel=alternate`` links of the
     publication type are its editions, best offer first, each with a hint of
-    what it is under ``properties.edition``. The self link echoes ``language``:
-    the list depends on it, so it names the document."""
-    logger.info("GET /works/%s language=%s access=%s", work_olid, language, access)
+    what it is under ``properties.edition``. The self link echoes ``language``
+    (the list depends on it) and names the edition the document leads with:
+    the ranking moves as loans are taken, and following the link again has
+    to show the same printing. ``edition`` asks for that one to lead."""
+    logger.info("GET /works/%s language=%s access=%s edition=%s", work_olid, language, access, edition)
     base = _base_url(request)
     provider = get_provider(base)
     language = canonical_language(language)
+    # Anything but an edition's OLID is no edition: the best leads.
+    if edition is not None and not re.fullmatch(r"OL[0-9]+M", edition):
+        edition = None
 
-    key = make_key("work", {"work_olid": work_olid, "language": language or "", "access": access or ""})
+    key = make_key("work", {
+        "work_olid": work_olid, "language": language or "", "access": access or "", "edition": edition or "",
+    })
 
     async def _fetch() -> dict:
         publication = await asyncio.to_thread(
-            _call_upstream, provider.work, work_olid=work_olid, language=language, access=access,
+            _call_upstream, provider.work, work_olid=work_olid, language=language, access=access, edition=edition,
         )
         if publication is None:
             logger.warning("work not found or nothing to list: %s", work_olid)
