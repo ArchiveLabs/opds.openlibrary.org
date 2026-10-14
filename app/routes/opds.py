@@ -28,6 +28,8 @@ except ImportError:  # an older pyopds2_openlibrary: one code, passed through as
     def canonical_language(raw: Optional[str]) -> Optional[str]:
         return raw or None
 
+from pyopds2_openlibrary import lists_recordings
+
 try:
     from pyopds2_openlibrary import canonical_media_type, canonical_mode
 except ImportError:  # an older pyopds2_openlibrary: one value, passed through as is
@@ -371,11 +373,14 @@ async def opds_search(
     cache: CacheBackend = Depends(get_cache),
 ):
     if work is not None:
-        # TEMPORARY (see _works_via_search): the other parameters a client's
-        # filter adds to a /search URL (mode, media_type) say nothing to a work.
+        # TEMPORARY (see _works_via_search): of the parameters a client's
+        # filter adds to a /search URL, mode says nothing to a work, and
+        # media_type does only as audiobooks alone (opds_works).
         if not re.fullmatch(r"OL[0-9]+W", work):
             raise WorkNotFound(work)
-        return await opds_works(request, work, language=language, access=access, edition=edition, cache=cache)
+        return await opds_works(
+            request, work, language=language, access=access, edition=edition, media_type=media_type, cache=cache,
+        )
     logger.info("GET /search query=%r limit=%s page=%s sort=%s mode=%s language=%s media_type=%s access=%s", query, limit, page, sort, mode, language, media_type, access)
     base = _base_url(request)
     provider = get_provider(base)
@@ -470,6 +475,7 @@ async def opds_works(
     language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 codes, the preferred one first: only editions in these languages are listed. Omit for all languages."),
     access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
     edition: Optional[str] = Query(default=None, description="The edition, OL…M, to lead with, ahead of any that ranks better. One the work does not have is ignored."),
+    media_type: Optional[str] = Query(default=None, description="Media type filter: 'audiobook' lists the work's recordings alone. Anything else lists every edition."),
     cache: CacheBackend = Depends(get_cache),
 ):
     """The work as an OPDS publication whose ``rel=alternate`` links of the
@@ -477,22 +483,28 @@ async def opds_works(
     what it is under ``properties.edition``. The self link echoes ``language``
     (the list depends on it) and names the edition the document leads with:
     the ranking moves as loans are taken, and following the link again has
-    to show the same printing. ``edition`` asks for that one to lead."""
-    logger.info("GET /works/%s language=%s access=%s edition=%s", work_olid, language, access, edition)
+    to show the same printing. ``edition`` asks for that one to lead.
+    ``media_type=audiobook`` lists the recordings alone, and is echoed too."""
+    logger.info("GET /works/%s language=%s access=%s edition=%s media_type=%s", work_olid, language, access, edition, media_type)
     base = _base_url(request)
     provider = get_provider(base)
     language = canonical_language(language)
     # Anything but an edition's OLID is no edition: the best leads.
     if edition is not None and not re.fullmatch(r"OL[0-9]+M", edition):
         edition = None
+    # Only audiobooks alone change the list, so any other value is none,
+    # and is cached as one.
+    media_type = "audiobook" if lists_recordings(media_type) else None
 
     key = make_key("work", {
         "work_olid": work_olid, "language": language or "", "access": access or "", "edition": edition or "",
+        **({"media_type": media_type} if media_type else {}),
     })
 
     async def _fetch() -> dict:
         publication = await asyncio.to_thread(
-            _call_upstream, provider.work, work_olid=work_olid, language=language, access=access, edition=edition,
+            _call_upstream, provider.work,
+            work_olid=work_olid, language=language, access=access, edition=edition, media_type=media_type,
         )
         if publication is None:
             logger.warning("work not found or nothing to list: %s", work_olid)

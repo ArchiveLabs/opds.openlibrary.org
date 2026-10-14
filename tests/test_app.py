@@ -487,7 +487,7 @@ class TestOpdsWorks:
     def test_passes_the_canonical_language_and_the_access_filter_to_the_provider(self):
         with patch(self.WORK_PATCH_TARGET, return_value=self._work_publication()) as work:
             client.get("/works/OL60149W?language=FR,%20en&access=print_disabled")
-        assert work.call_args.kwargs == {"work_olid": "OL60149W", "language": "fr,en", "access": "print_disabled", "edition": None}
+        assert work.call_args.kwargs == {"work_olid": "OL60149W", "language": "fr,en", "access": "print_disabled", "edition": None, "media_type": None}
 
     def test_no_language_is_passed_as_none(self):
         with patch(self.WORK_PATCH_TARGET, return_value=self._work_publication()) as work:
@@ -499,6 +499,13 @@ class TestOpdsWorks:
             client.get("/works/OL60149W?language=en&edition=OL7M")
             client.get("/works/OL60149W?language=en&edition=OL8M")
         assert [c.kwargs["edition"] for c in work.call_args_list] == ["OL7M", "OL8M"]
+
+    def test_audiobooks_alone_reach_the_provider_and_any_other_value_is_none(self):
+        with patch(self.WORK_PATCH_TARGET, return_value=self._work_publication()) as work:
+            client.get("/works/OL60149W?language=en&media_type=Audiobook")
+            client.get("/works/OL60149W?language=en&media_type=ebook")
+            client.get("/works/OL60149W?language=en&media_type=ebook,audiobook")
+        assert [c.kwargs["media_type"] for c in work.call_args_list] == ["audiobook", None, None]
 
     def test_an_edition_that_is_not_an_edition_olid_is_none(self):
         with patch(self.WORK_PATCH_TARGET, return_value=self._work_publication()) as work:
@@ -542,12 +549,17 @@ class TestWorksViaSearch:
             resp = client.get("/search?work=OL60149W&language=en,fr&mode=ebooks&access=print_disabled")
         assert resp.status_code == 200
         assert "application/opds-publication+json" in resp.headers["content-type"]
-        assert work.call_args.kwargs == {"work_olid": "OL60149W", "language": "en,fr", "access": "print_disabled", "edition": None}
+        assert work.call_args.kwargs == {"work_olid": "OL60149W", "language": "en,fr", "access": "print_disabled", "edition": None, "media_type": None}
 
     def test_search_with_work_passes_the_edition(self):
         with patch(self.WORK_PATCH_TARGET, return_value=TestOpdsWorks._work_publication()) as work:
             client.get("/search?work=OL60149W&language=en&edition=OL1M")
         assert work.call_args.kwargs["edition"] == "OL1M"
+
+    def test_search_with_work_passes_audiobooks(self):
+        with patch(self.WORK_PATCH_TARGET, return_value=TestOpdsWorks._work_publication()) as work:
+            client.get("/search?work=OL60149W&media_type=audiobook")
+        assert work.call_args.kwargs["media_type"] == "audiobook"
 
     def test_a_malformed_work_is_404_and_reaches_nothing(self):
         with patch(self.WORK_PATCH_TARGET) as work:
