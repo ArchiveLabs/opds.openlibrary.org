@@ -108,6 +108,14 @@ rather than a cover or a banner. On an author page it is the author's photo
 at `https://covers.openlibrary.org/a/id/<photo>-L.jpg`, with `width` and
 `height` the pixel size of that file when it is known.
 
+The same relation pictures an author wherever a publication names them:
+each author contributor with a page of their own carries, beside its two
+`author` links, a link with this `rel` to
+`https://covers.openlibrary.org/a/olid/<olid>-L.jpg?default=false`, of
+type `image/jpeg` and with no size. It is addressed by the author's id, so
+a search result pictures its authors without a request per author, and
+answers 404 for an author with no photo rather than a blank image.
+
 ## Subject schemes
 
 A publication's `metadata.subject` is a list of subject objects

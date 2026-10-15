@@ -1575,7 +1575,27 @@ class TestAuthorOpdsLink:
         author = meta.author[0]
         link_types = [l.type for l in (author.links or [])]
         assert "application/opds+json" in link_types
-        assert all(l.rel == "author" for l in author.links)
+        # The pages are rel=author; the portrait beside them is not a page.
+        pages = [l for l in author.links if l.type != "image/jpeg"]
+        assert all(l.rel == "author" for l in pages)
+
+    def test_author_has_a_portrait_link_by_id(self):
+        from pyopds2_openlibrary import OpenLibraryDataRecord, OpenLibraryDataProvider
+        OpenLibraryDataProvider.OPDS_BASE_URL = "https://opds.example.com"
+        record = OpenLibraryDataRecord.model_validate({
+            "key": "/works/OL1W",
+            "title": "Test Book",
+            "author_name": ["James McBride"],
+            "author_key": ["OL1234A"],
+            "editions": {
+                "numFound": 1, "start": 0, "numFoundExact": True,
+                "docs": [{"key": "/books/OL1M", "title": "Test Book"}],
+            },
+        })
+        [author] = record.metadata().author
+        [portrait] = [l for l in author.links if l.rel == "https://openlibrary.org/opds/rel/portrait"]
+        assert portrait.href == "https://covers.openlibrary.org/a/olid/OL1234A-L.jpg?default=false"
+        assert portrait.type == "image/jpeg"
 
     def test_opds_link_href_contains_olid(self):
         from pyopds2_openlibrary import OpenLibraryDataRecord, OpenLibraryDataProvider
