@@ -122,16 +122,20 @@ def test_search_availability_facets_present(client: httpx.Client) -> None:
     r = client.get("/search?query=tolkien")
     assert r.status_code == 200
     facets = r.json().get("facets", [])
-    titles = [f.get("metadata", {}).get("title") for f in facets]
-    assert "Availability" in titles, f"Availability facet group missing; got: {titles}"
+    rels = [r for f in facets for l in f.get("links", []) for r in ([l["rel"]] if isinstance(l.get("rel"), str) else l.get("rel", []))]
+    assert AVAILABILITY in rels, f"Availability facet group missing; got: {facets}"
 
 
-FACET_RELS = {
-    "Availability": "https://openlibrary.org/opds/rel/facet/availability",
-    "Language": "https://openlibrary.org/opds/rel/facet/language",
-    "Media Type": "https://openlibrary.org/opds/rel/facet/media-type",
-    "Access": "https://openlibrary.org/opds/rel/facet/access",
-}
+AVAILABILITY = "https://openlibrary.org/opds/rel/facet/availability"
+
+# The groups in order, by title and relation. A list, not a dict keyed by
+# title: availability and print disability are both titled Access.
+FACET_RELS = [
+    ("Access", AVAILABILITY),
+    ("Language", "https://openlibrary.org/opds/rel/facet/language"),
+    ("Format", "https://openlibrary.org/opds/rel/facet/media-type"),
+    ("Access", "https://openlibrary.org/opds/rel/facet/access"),
+]
 
 
 def _has_rel(link: dict, rel: str) -> bool:
@@ -147,9 +151,8 @@ def test_facet_links_carry_their_group_rel(client: httpx.Client, path: str) -> N
     r = client.get(path)
     assert r.status_code == 200
     facets = r.json().get("facets", [])
-    assert [f["metadata"]["title"] for f in facets] == list(FACET_RELS), path
-    for group in facets:
-        rel = FACET_RELS[group["metadata"]["title"]]
+    assert [f["metadata"]["title"] for f in facets] == [title for title, _ in FACET_RELS], path
+    for group, (_, rel) in zip(facets, FACET_RELS):
         for link in group["links"]:
             assert _has_rel(link, rel), (path, group["metadata"]["title"], link)
         applied = [l for l in group["links"] if _has_rel(l, "self")]
@@ -161,7 +164,7 @@ def test_facet_links_carry_their_group_rel(client: httpx.Client, path: str) -> N
 def test_facet_rels_resolve(client: httpx.Client) -> None:
     """A relation the feed coins is a URL that resolves to its documentation.
     Checked on the instance under test, at the path under its own base."""
-    for rel in FACET_RELS.values():
+    for _, rel in FACET_RELS:
         r = client.get(rel.removeprefix("https://openlibrary.org/opds"))
         assert r.status_code == 200, rel
         assert r.headers["content-type"].startswith("text/html")
@@ -181,7 +184,7 @@ def test_search_availability_facets_have_no_numberOfItems(client: httpx.Client) 
     assert r.status_code == 200
     facets = r.json().get("facets", [])
     availability = next(
-        (f for f in facets if f.get("metadata", {}).get("title") == "Availability"),
+        (f for f in facets if any(_has_rel(l, AVAILABILITY) for l in f.get("links", []))),
         None,
     )
     assert availability is not None
@@ -309,7 +312,7 @@ def test_author_books_feed_lists_the_books_with_facets(client: httpx.Client) -> 
     # can offer, so the page is short, never longer.
     assert 0 < len(body["publications"]) <= 25
     assert "groups" not in body
-    assert {f["metadata"]["title"] for f in body["facets"]} >= {"Availability", "Language", "Media Type", "Access"}
+    assert [f["metadata"]["title"] for f in body["facets"]] == ["Access", "Language", "Format", "Access"]
     assert all(l["href"].split("?")[0].endswith("/authors/OL31353A/books") for f in body["facets"] for l in f["links"])
     links = {l["rel"]: l["href"] for l in body["links"] if isinstance(l["rel"], str)}
     assert links["up"].endswith("/authors/OL31353A")

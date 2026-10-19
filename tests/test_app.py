@@ -1236,17 +1236,14 @@ class TestOpdsAuthors:
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A/books").json()
         facet_titles = {f["metadata"]["title"] for f in data.get("facets", [])}
-        assert "Availability" in facet_titles
-        assert "Language" in facet_titles
-        assert "Media Type" in facet_titles
-        assert "Access" in facet_titles
+        assert facet_titles == {"Access", "Language", "Format"}
 
     def test_author_availability_facet_no_buyable(self):
         record = _make_record()
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A/books").json()
-        avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
+        avail = _group(data["facets"], REL_AVAILABILITY)
         titles = {l["title"] for l in avail["links"]}
         assert "Buy" not in titles
 
@@ -1255,7 +1252,7 @@ class TestOpdsAuthors:
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A/books?mode=ebooks").json()
-        avail = next(f for f in data["facets"] if f["metadata"]["title"] == "Availability")
+        avail = _group(data["facets"], REL_AVAILABILITY)
         ebooks_link = next(l for l in avail["links"] if l["title"] == "Borrow")
         assert has_rel(ebooks_link, "self")
 
@@ -1814,7 +1811,7 @@ class TestAccessFilter:
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)), \
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A/books?access=print_disabled&mode=ebooks").json()
-        access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Access")
+        access_facet = _group(data["facets"], REL_ACCESS)
         pd_link = next(l for l in access_facet["links"] if l["title"] == "Print Disabled")
         assert "access=print_disabled" in pd_link["href"]
 
@@ -2493,21 +2490,31 @@ class TestFacetLists:
 # Link relations
 # ---------------------------------------------------------------------------
 
-FACET_RELS = {
-    "Availability": "https://openlibrary.org/opds/rel/facet/availability",
-    "Language": "https://openlibrary.org/opds/rel/facet/language",
-    "Media Type": "https://openlibrary.org/opds/rel/facet/media-type",
-    "Access": "https://openlibrary.org/opds/rel/facet/access",
-}
+REL_AVAILABILITY = "https://openlibrary.org/opds/rel/facet/availability"
+REL_ACCESS = "https://openlibrary.org/opds/rel/facet/access"
+
+# The groups in order, by title and relation. A list, not a dict keyed by
+# title: availability and print disability are both titled Access.
+FACET_RELS = [
+    ("Access", REL_AVAILABILITY),
+    ("Language", "https://openlibrary.org/opds/rel/facet/language"),
+    ("Format", "https://openlibrary.org/opds/rel/facet/media-type"),
+    ("Access", REL_ACCESS),
+]
 REL_SORT_POPULAR = "http://opds-spec.org/sort/popular"
+
+
+def _group(facets, rel):
+    """The facet group whose options carry ``rel``: a group is told by its
+    relation, since two share the title Access."""
+    return next((g for g in facets if any(has_rel(l, rel) for l in g["links"])), None)
 
 
 def _assert_facet_rels(facets):
     """Every option link carries its group's relation; the applied one
     ``["self", <relation>]``; nothing carries another group's."""
-    assert [g["metadata"]["title"] for g in facets] == list(FACET_RELS)
-    for group in facets:
-        rel = FACET_RELS[group["metadata"]["title"]]
+    assert [g["metadata"]["title"] for g in facets] == [title for title, _ in FACET_RELS]
+    for group, (_, rel) in zip(facets, FACET_RELS):
         for link in group["links"]:
             rels = link["rel"] if isinstance(link["rel"], list) else [link["rel"]]
             assert [r for r in rels if r != "self"] == [rel], link
@@ -2565,7 +2572,7 @@ class TestRelRoute:
     """The feed's own relations resolve to the page documenting them."""
 
     def test_each_facet_rel_resolves_to_html(self):
-        for rel in FACET_RELS.values():
+        for rel in (rel for _, rel in FACET_RELS):
             path = rel.removeprefix("https://openlibrary.org/opds")
             r = client.get(path)
             assert r.status_code == 200, rel
@@ -2581,7 +2588,7 @@ class TestRelRoute:
         for path in ("/rel", "/rel/"):
             r = client.get(path)
             assert r.status_code == 200
-            assert all(rel in r.text for rel in FACET_RELS.values())
+            assert all(rel in r.text for rel in (rel for _, rel in FACET_RELS))
 
     def test_a_relation_never_coined_is_404(self):
         r = client.get("/rel/facet/colour")
