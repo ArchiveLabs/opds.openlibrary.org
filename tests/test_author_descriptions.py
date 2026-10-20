@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from app import author_descriptions
-from app.author_descriptions import TABLE_PATH, author_description, load, reset, size
+from app.author_descriptions import TABLE_PATH, author_description, author_item, load, reset, size
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parent.parent
 def table(tmp_path):
     """A small table, unsorted and with a few malformed lines, loaded for the test."""
     lines = [
-        "OL31353A\tAmerican fantasy and science fiction author (1929–2018)",
+        "OL31353A\tQ181659\tAmerican fantasy and science fiction author (1929–2018)",
         "OL1A\twriter from Odisha, India",
         "not an olid\tignored",
         "OL7A",                      # no tab, no description
@@ -45,6 +45,17 @@ class TestLookup:
         assert author_description("OL99999999A") is None
         assert author_description("OL7A") is None
         assert author_description("OL9A") is None
+
+    def test_an_author_is_linked_to_the_item_their_description_is_from(self, table):
+        assert author_item("OL31353A") == "Q181659"
+
+    def test_a_line_of_the_older_two_column_table_has_no_item(self, table):
+        assert author_description("OL1A") == "writer from Odisha, India"
+        assert author_item("OL1A") is None
+
+    def test_an_author_missing_from_the_table_has_no_item(self, table):
+        assert author_item("OL2A") is None
+        assert author_item("not an olid") is None
 
     def test_malformed_lines_are_skipped_and_counted_out(self, table):
         assert size() == 3
@@ -83,15 +94,27 @@ class TestShippedTable:
         assert all(re.fullmatch(r"OL\d+A", olid) for olid in olids)
         numbers = [int(olid[2:-1]) for olid in olids]
         assert numbers == sorted(numbers) and len(set(numbers)) == len(numbers)
-        assert all(line.count("\t") == 1 and line.split("\t", 1)[1].strip() for line in lines)
+        assert all(
+            line.count("\t") == 2
+            and re.fullmatch(r"Q\d+", line.split("\t")[1])
+            and line.split("\t", 2)[2].strip()
+            for line in lines
+        )
 
     def test_it_is_reproducible_from_the_build_script(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("build", REPO / "scripts" / "build_author_descriptions.py")
         build = importlib.util.module_from_spec(spec); spec.loader.exec_module(build)
         with gzip.open(TABLE_PATH, "rt", encoding="utf-8") as f:
-            table = {int(olid[2:-1]): description for olid, description in (line.split("\t", 1) for line in f.read().splitlines())}
+            table = {
+                int(olid[2:-1]): (int(item[1:]), description)
+                for olid, item, description in (line.split("\t", 2) for line in f.read().splitlines())
+            }
         assert build.render(table) == TABLE_PATH.read_bytes()
+
+    def test_le_guin_is_linked_to_her_item(self):
+        reset()
+        assert author_item("OL31353A") == "Q181659"
 
     def test_le_guin_is_described(self):
         assert author_description("OL31353A") == "American fantasy and science fiction author (1929–2018)"

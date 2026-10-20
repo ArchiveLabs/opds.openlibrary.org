@@ -79,8 +79,9 @@ def _unquote(term: str) -> str:
     return " ".join(term.split())
 
 
-def parse_rows(tsv: str) -> dict[int, str]:
-    """``{olid number: description}``, the lowest-numbered item winning a tie."""
+def parse_rows(tsv: str) -> dict[int, tuple[int, str]]:
+    """``{olid number: (item number, description)}``, the lowest-numbered item
+    winning a tie."""
     chosen: dict[int, tuple[int, str]] = {}
     lines = tsv.splitlines()
     for line in lines[1:]:
@@ -96,12 +97,16 @@ def parse_rows(tsv: str) -> dict[int, str]:
         current = chosen.get(number)
         if current is None or item < current[0]:
             chosen[number] = (item, description)
-    return {number: description for number, (_, description) in chosen.items()}
+    return chosen
 
 
-def render(table: dict[int, str]) -> bytes:
-    """The gzipped TSV, byte-for-byte reproducible for the same table."""
-    text = "".join(f"OL{number}A\t{table[number]}\n" for number in sorted(table))
+def render(table: dict[int, tuple[int, str]]) -> bytes:
+    """The gzipped TSV, ``OLID<TAB>Q…<TAB>description``, byte-for-byte
+    reproducible for the same table. The item is kept so the feed can link
+    the description to its source."""
+    text = "".join(
+        f"OL{number}A\tQ{table[number][0]}\t{table[number][1]}\n" for number in sorted(table)
+    )
     buffer = io.BytesIO()
     with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0, compresslevel=9) as gz:
         gz.write(text.encode("utf-8"))

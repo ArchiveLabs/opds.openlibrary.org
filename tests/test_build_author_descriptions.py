@@ -25,9 +25,9 @@ TSV = "\n".join([
 def test_rows_are_parsed_unescaped_deduplicated_and_filtered():
     table = build.parse_rows(TSV)
     assert table == {
-        31353: "American fantasy and science fiction author (1929–2018)",
-        1: "writer from Odisha, India",
-        5: "the lower item wins",
+        31353: (181659, "American fantasy and science fiction author (1929–2018)"),
+        1: (500, "writer from Odisha, India"),
+        5: (3, "the lower item wins"),
     }
 
 
@@ -37,7 +37,7 @@ def test_rendering_is_sorted_by_olid_number_and_byte_for_byte_reproducible():
     assert data == build.render(dict(reversed(list(table.items()))))
     text = gzip.decompress(data).decode("utf-8")
     assert text == (
-        "OL1A\twriter from Odisha, India\n"
-        "OL5A\tthe lower item wins\n"
-        "OL31353A\tAmerican fantasy and science fiction author (1929–2018)\n"
+        "OL1A\tQ500\twriter from Odisha, India\n"
+        "OL5A\tQ3\tthe lower item wins\n"
+        "OL31353A\tQ181659\tAmerican fantasy and science fiction author (1929–2018)\n"
     )
