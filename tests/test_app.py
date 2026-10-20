@@ -39,6 +39,7 @@ BUILD_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_facet
 BUILD_HOME_FACETS_PATCH_TARGET = "app.routes.opds.OpenLibraryDataProvider.build_home_facets"
 FETCH_AUTHOR_INFO_PATCH_TARGET = "app.routes.opds.fetch_author_info"
 AUTHOR_DESCRIPTION_PATCH_TARGET = "app.routes.opds.author_description"
+AUTHOR_ITEM_PATCH_TARGET = "app.routes.opds.author_item"
 
 
 def _author_info(name=None, bio=None, photo_id=None, size=None):
@@ -1117,6 +1118,30 @@ class TestOpdsAuthors:
         assert data["metadata"]["subtitle"] == "French philosopher, author, and journalist (1913–1960)"
         assert data["metadata"]["description"] == bio
         assert lookup.call_args.args == ("OL1234A",)
+
+    def test_the_subtitle_links_its_source_the_wikidata_item(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Albert Camus", None)), \
+             patch(AUTHOR_DESCRIPTION_PATCH_TARGET, return_value="French philosopher"), \
+             patch(AUTHOR_ITEM_PATCH_TARGET, return_value="Q34670"), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        source = [l for l in data["links"] if l.get("rel") == "describedby"]
+        assert source == [{
+            "rel": "describedby",
+            "href": "https://www.wikidata.org/wiki/Q34670",
+            "type": "text/html",
+            "title": "Wikidata",
+        }]
+
+    def test_no_subtitle_means_no_source_link(self):
+        record = _make_record()
+        with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("James McBride", None)), \
+             patch(AUTHOR_DESCRIPTION_PATCH_TARGET, return_value=None), \
+             patch(AUTHOR_ITEM_PATCH_TARGET, return_value="Q1"), \
+             patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
+            data = client.get("/authors/OL1234A").json()
+        assert not [l for l in data["links"] if l.get("rel") == "describedby"]
 
     def test_no_table_entry_means_no_subtitle_but_the_bio_stays(self):
         record = _make_record()

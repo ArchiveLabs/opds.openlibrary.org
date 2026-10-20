@@ -63,7 +63,7 @@ from app.config import (
 )
 import sentry_sdk
 
-from app.author_descriptions import author_description
+from app.author_descriptions import author_description, author_item
 from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError, WorkNotFound
 from app.logger import get_logger
 
@@ -652,6 +652,9 @@ async def opds_authors(
         # ``metadata.description``. The summary comes from a table shipped
         # with the app, so it costs no request (see app/author_descriptions.py).
         author_summary = author_description(olid)
+        # Its source, the author's Wikidata item, linked as what describes
+        # them, so a client can cite and link the line.
+        summary_item = author_item(olid) if author_summary else None
 
         has_books = popular_response is not None and bool(popular_response.records)
         if not has_books and info.name is None and info.bio is None:
@@ -680,6 +683,12 @@ async def opds_authors(
             links=[
                 Link(rel="self", href=_author_page_href(base, olid, **filters), type=OPDS_MEDIA_TYPE),
                 Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}/authors/{olid}", type="text/html"),
+                *([Link(
+                    rel="describedby",
+                    href=f"https://www.wikidata.org/wiki/{summary_item}",
+                    type="text/html",
+                    title="Wikidata",
+                )] if summary_item else []),
                 *_common_links(base),
             ],
             # The list of all the author's books is its own feed; the page
