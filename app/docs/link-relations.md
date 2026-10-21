@@ -22,14 +22,15 @@ is a collection with a title and option links; the applied option carries
 `self`. The title is for people and may one day be translated; the relation
 is for clients. Every option link in a group carries the group's relation,
 the applied option as `["self", <relation>]`, so a client finds the
-Availability picker by relation whatever its title says. The options' own
+availability picker by relation whatever its title says. The options' own
 identity stays the query parameter and value in their href.
 
 ### facet/availability
 
 `https://openlibrary.org/opds/rel/facet/availability`
 
-The group titled Availability. Its options set `mode`: `everything`, the
+The group titled Access (the print-disability group is titled Access too,
+which is one reason to go by relation). Its options set `mode`: `everything`, the
 option with no `mode`, applies no availability filter; `ebooks` keeps books
 that can be borrowed or read for free; `open_access` keeps books free to read;
 `buyable`, on search pages only, keeps books that can be bought. Several
@@ -49,7 +50,7 @@ selection of several languages marks no option `self`.
 
 `https://openlibrary.org/opds/rel/facet/media-type`
 
-The group titled Media Type. Its options set `media_type`: `ebook`,
+The group titled Format. Its options set `media_type`: `ebook`,
 `audiobook`, or both comma-separated; the option with no `media_type` keeps
 both.
 

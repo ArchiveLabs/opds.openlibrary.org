@@ -74,10 +74,10 @@ option as `["self", <relation>]`:
 
 | Facet group | Relation on each option link |
 |---|---|
-| Availability | `https://openlibrary.org/opds/rel/facet/availability` |
+| Access (what a reader can get) | `https://openlibrary.org/opds/rel/facet/availability` |
 | Language | `https://openlibrary.org/opds/rel/facet/language` |
-| Media Type | `https://openlibrary.org/opds/rel/facet/media-type` |
-| Access | `https://openlibrary.org/opds/rel/facet/access` |
+| Format | `https://openlibrary.org/opds/rel/facet/media-type` |
+| Access (print disability) | `https://openlibrary.org/opds/rel/facet/access` |
 
 The Trending Books carousel's `self` link, and the Popular Books
 carousel's on an author page, also carry the registered
