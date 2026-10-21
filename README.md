@@ -78,10 +78,12 @@ option as `["self", <relation>]`:
 | Language | `https://openlibrary.org/opds/rel/facet/language` |
 | Format | `https://openlibrary.org/opds/rel/facet/media-type` |
 | Access (print disability) | `https://openlibrary.org/opds/rel/facet/access` |
+| Sort (a shelf or a genre) | `https://openlibrary.org/opds/rel/facet/sort` |
 
 The Trending Books carousel's `self` link, and the Popular Books
 carousel's on an author page, also carry the registered
-`http://opds-spec.org/sort/popular`. An author page, `/authors/{olid}`, is
+`http://opds-spec.org/sort/popular`, as does the Sort group's Trending
+option; its Recent option carries `http://opds-spec.org/sort/new`. An author page, `/authors/{olid}`, is
 the page about the author, not the list of their books: it links to the
 author's openlibrary.org page as `alternate`, carries the author's photo as
 a feed-level `images` entry with `https://openlibrary.org/opds/rel/portrait`,

@@ -62,6 +62,18 @@ The group titled Access. Its options set `access`: `general`, the option
 with no `access`, hides print-disabled-only books; `print_disabled` shows
 only those.
 
+### facet/sort
+
+`https://openlibrary.org/opds/rel/facet/sort`
+
+The group titled Sort, offered on a search page opened in an order (one
+with `sort`): a shelf or a genre, but not the Trending Books shelf, and not
+a search for words, whose order is relevance. Its options set `sort`:
+`trending` (Trending), `new` (Recent) and `title` (Title). The applied
+option is the order `sort` leads with. An order OPDS has a relation for
+carries it beside the group's: Trending
+`http://opds-spec.org/sort/popular`, Recent `http://opds-spec.org/sort/new`.
+
 ## Carousels
 
 A feed's `groups` are its carousels, each a collection with a `self` link
