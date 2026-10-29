@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from app import author_descriptions
 from app.cache import get_cache, LANG_OPTIONS_KEY, TTL_LANG_OPTIONS_SECONDS
-from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError, WorkNotFound
+from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamBusy, UpstreamError, WorkNotFound
 from app.logger import get_logger
 from app.routes.icloud import router as icloud_router
 from app.routes.opds import router as opds_router
@@ -131,6 +131,16 @@ def handle_author_not_found(_: Request, exc: AuthorNotFound) -> JSONResponse:
 def handle_upstream_error(_: Request, exc: UpstreamError) -> JSONResponse:
     logger.error("502 UpstreamError: %s", exc)
     return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(UpstreamBusy)
+def handle_upstream_busy(_: Request, exc: UpstreamBusy) -> JSONResponse:
+    logger.warning("503 UpstreamBusy: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc)},
+        headers={"Retry-After": "5"},
+    )
 
 
 @app.get("/sw.js", include_in_schema=False)

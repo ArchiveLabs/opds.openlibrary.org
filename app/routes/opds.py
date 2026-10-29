@@ -64,7 +64,7 @@ from app.config import (
 import sentry_sdk
 
 from app.author_descriptions import author_description, author_item
-from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamError, WorkNotFound
+from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamBusy, UpstreamError, WorkNotFound
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -195,7 +195,7 @@ def _call_upstream(func, **kwargs):
             logger.warning("OL rate-limited OPDS request (Retry-After: %s) url=%s", retry_after, exc.request.url)
             with sentry_sdk.new_scope() as scope:
                 scope.set_tag("ol_rate_limited", "true")
-                scope.set_fingerprint(["ol-rate-limited"])
+                scope.fingerprint = ["ol-rate-limited"]
                 scope.set_extra("url", str(exc.request.url))
                 scope.set_extra("retry_after", retry_after)
                 scope.set_extra("query", kwargs.get("query", ""))
@@ -209,6 +209,20 @@ def _call_upstream(func, **kwargs):
             f"OpenLibrary returned {status_code}",
             status_code=status_code,
         ) from exc
+    except httpx.PoolTimeout as exc:
+        # No request went out: the pool's connections were all held, usually
+        # by slow Open Library reads. One fingerprint, as a warning, so a
+        # busy spell is one issue to watch rather than an error per request.
+        try:
+            url = exc.request.url
+        except RuntimeError:
+            url = None
+        logger.warning("upstream pool full url=%s", url)
+        with sentry_sdk.new_scope() as scope:
+            scope.fingerprint = ["ol-pool-full"]
+            scope.set_extra("url", str(url))
+            sentry_sdk.capture_message("OL connection pool full", level="warning")
+        raise UpstreamBusy("Too many requests to OpenLibrary in flight; try again shortly") from exc
     except httpx.RequestError as exc:
         # The type, not just the message: some say nothing (a PoolTimeout's
         # is empty), and the type is what tells a pool, a connect and a read

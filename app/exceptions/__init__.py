@@ -6,6 +6,7 @@ __all__ = [
     "WorkNotFound",
     "AuthorNotFound",
     "UpstreamError",
+    "UpstreamBusy",
 ]
 
 
@@ -36,3 +37,8 @@ class UpstreamError(OPDSException):
     def __init__(self, message: str, status_code: int | None = None):
         self.status_code = status_code
         super().__init__(message)
+
+
+class UpstreamBusy(UpstreamError):
+    """Every connection to Open Library is in use. The fault is our capacity,
+    not Open Library, so it is answered 503 for the client to retry."""

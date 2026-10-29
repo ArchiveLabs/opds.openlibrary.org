@@ -757,12 +757,25 @@ class TestUpstreamErrors:
 
     def test_a_request_error_without_a_message_is_named_by_its_type(self, caplog):
         _req = httpx.Request("GET", "https://openlibrary.org/search.json")
-        exc = httpx.PoolTimeout("", request=_req)
+        exc = httpx.WriteTimeout("", request=_req)
         with patch(SEARCH_PATCH_TARGET, side_effect=exc), caplog.at_level("ERROR"):
             resp = client.get("/search?query=test")
         assert resp.status_code == 502
-        assert resp.json()["detail"] == "Could not reach OpenLibrary: PoolTimeout"
-        assert "upstream request error PoolTimeout url=https://openlibrary.org/search.json" in caplog.text
+        assert resp.json()["detail"] == "Could not reach OpenLibrary: WriteTimeout"
+        assert "upstream request error WriteTimeout url=https://openlibrary.org/search.json" in caplog.text
+
+    def test_a_full_connection_pool_is_503_and_a_warning(self, caplog):
+        _req = httpx.Request("GET", "https://openlibrary.org/search.json")
+        exc = httpx.PoolTimeout("", request=_req)
+        with patch(SEARCH_PATCH_TARGET, side_effect=exc), \
+                patch("app.routes.opds.sentry_sdk.capture_message") as capture, \
+                caplog.at_level("WARNING"):
+            resp = client.get("/search?query=test")
+        assert resp.status_code == 503
+        assert resp.headers["Retry-After"] == "5"
+        assert "upstream pool full url=https://openlibrary.org/search.json" in caplog.text
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        capture.assert_called_once_with("OL connection pool full", level="warning")
 
     def test_a_request_error_without_a_request_still_logs(self):
         with patch(SEARCH_PATCH_TARGET, side_effect=httpx.ReadTimeout("timed out")):
@@ -2331,7 +2344,7 @@ class TestRateLimitSentryCapture:
         """Common sentry patches: new_scope as context manager + capture_message.
 
         Returns (scope_patch, capture_patch, mock_scope) so callers can assert
-        on scope.set_extra / scope.set_fingerprint / scope.set_tag calls.
+        on scope.set_extra / scope.fingerprint / scope.set_tag.
         """
         mock_scope = MagicMock()
         mock_scope.__enter__ = MagicMock(return_value=mock_scope)
@@ -2359,6 +2372,15 @@ class TestRateLimitSentryCapture:
         message, = mock_capture.call_args.args
         assert "rate-limited" in message.lower()
         assert mock_capture.call_args.kwargs.get("level") == "warning"
+
+    def test_429_with_a_real_sentry_scope_is_502(self):
+        """The scope calls must exist on the installed sentry-sdk, not just on a mock."""
+        with (
+            patch("app.routes.opds.OpenLibraryDataProvider.search", side_effect=self._make_429_error()),
+            patch("app.routes.opds.OpenLibraryDataProvider.fetch_language_counts", return_value={}),
+        ):
+            resp = client.get("/search?query=python")
+        assert resp.status_code == 502
 
     def test_non_429_errors_do_not_capture_sentry(self):
         """Non-rate-limit HTTP errors must NOT trigger a Sentry capture_message."""
@@ -2395,7 +2417,7 @@ class TestRateLimitSentryCapture:
             client.get("/search?query=test")
         mock_capture.assert_called_once()
         mock_scope.set_extra.assert_any_call("retry_after", "120")
-        mock_scope.set_fingerprint.assert_called_once_with(["ol-rate-limited"])
+        assert mock_scope.fingerprint == ["ol-rate-limited"]
         mock_scope.set_tag.assert_any_call("ol_rate_limited", "true")
 
     def test_retry_after_header_absent_defaults_to_unknown(self):
