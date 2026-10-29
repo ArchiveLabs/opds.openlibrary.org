@@ -128,13 +128,12 @@ def test_search_availability_facets_present(client: httpx.Client) -> None:
 
 AVAILABILITY = "https://openlibrary.org/opds/rel/facet/availability"
 
-# The groups in order, by title and relation. A list, not a dict keyed by
-# title: availability and print disability are both titled Access.
+# The groups in order, by title and relation.
 FACET_RELS = [
     ("Access", AVAILABILITY),
     ("Language", "https://openlibrary.org/opds/rel/facet/language"),
     ("Format", "https://openlibrary.org/opds/rel/facet/media-type"),
-    ("Access", "https://openlibrary.org/opds/rel/facet/access"),
+    ("Accessibility", "https://openlibrary.org/opds/rel/facet/access"),
 ]
 
 
@@ -312,7 +311,7 @@ def test_author_books_feed_lists_the_books_with_facets(client: httpx.Client) -> 
     # can offer, so the page is short, never longer.
     assert 0 < len(body["publications"]) <= 25
     assert "groups" not in body
-    assert [f["metadata"]["title"] for f in body["facets"]] == ["Access", "Language", "Format", "Access"]
+    assert [f["metadata"]["title"] for f in body["facets"]] == ["Access", "Language", "Format", "Accessibility"]
     assert all(l["href"].split("?")[0].endswith("/authors/OL31353A/books") for f in body["facets"] for l in f["links"])
     links = {l["rel"]: l["href"] for l in body["links"] if isinstance(l["rel"], str)}
     assert links["up"].endswith("/authors/OL31353A")

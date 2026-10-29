@@ -77,7 +77,7 @@ option as `["self", <relation>]`:
 | Access (what a reader can get) | `https://openlibrary.org/opds/rel/facet/availability` |
 | Language | `https://openlibrary.org/opds/rel/facet/language` |
 | Format | `https://openlibrary.org/opds/rel/facet/media-type` |
-| Access (print disability) | `https://openlibrary.org/opds/rel/facet/access` |
+| Accessibility | `https://openlibrary.org/opds/rel/facet/access` |
 | Sort (a shelf or a genre) | `https://openlibrary.org/opds/rel/facet/sort` |
 
 The Trending Books carousel's `self` link, and the Popular Books

@@ -829,7 +829,7 @@ def _fake_facets(base_url="", query="test", sort=None, mode="everything", langua
     ]
     return [
         {"metadata": {"title": "Availability"}, "links": avail_links},
-        {"metadata": {"title": "Access"}, "links": access_links},
+        {"metadata": {"title": "Accessibility"}, "links": access_links},
     ]
 
 
@@ -875,7 +875,7 @@ class TestFacets:
 
     def test_access_facet_present(self, mock_empty_search):
         data = client.get("/search?query=test").json()
-        access_facet = next((f for f in data["facets"] if f["metadata"]["title"] == "Access"), None)
+        access_facet = next((f for f in data["facets"] if f["metadata"]["title"] == "Accessibility"), None)
         assert access_facet is not None
         titles = {l["title"] for l in access_facet["links"]}
         assert "General" in titles
@@ -883,13 +883,13 @@ class TestFacets:
 
     def test_active_access_facet_has_self_rel(self, mock_empty_search):
         data = client.get("/search?query=test&access=print_disabled").json()
-        access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Access")
+        access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Accessibility")
         pd_link = next(l for l in access_facet["links"] if l["title"] == "Print Disabled")
         assert pd_link["rel"] == "self"
 
     def test_general_access_is_default_active(self, mock_empty_search):
         data = client.get("/search?query=test").json()
-        access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Access")
+        access_facet = next(f for f in data["facets"] if f["metadata"]["title"] == "Accessibility")
         general_link = next(l for l in access_facet["links"] if l["title"] == "General")
         assert general_link.get("rel") == "self"
 
@@ -1261,7 +1261,7 @@ class TestOpdsAuthors:
              patch(SEARCH_PATCH_TARGET, return_value=_make_search_response(records=[record], total=1)):
             data = client.get("/authors/OL1234A/books").json()
         facet_titles = {f["metadata"]["title"] for f in data.get("facets", [])}
-        assert facet_titles == {"Access", "Language", "Format"}
+        assert facet_titles == {"Access", "Language", "Format", "Accessibility"}
 
     def test_author_availability_facet_no_buyable(self):
         record = _make_record()
@@ -2518,20 +2518,19 @@ class TestFacetLists:
 REL_AVAILABILITY = "https://openlibrary.org/opds/rel/facet/availability"
 REL_ACCESS = "https://openlibrary.org/opds/rel/facet/access"
 
-# The groups in order, by title and relation. A list, not a dict keyed by
-# title: availability and print disability are both titled Access.
+# The groups in order, by title and relation.
 FACET_RELS = [
     ("Access", REL_AVAILABILITY),
     ("Language", "https://openlibrary.org/opds/rel/facet/language"),
     ("Format", "https://openlibrary.org/opds/rel/facet/media-type"),
-    ("Access", REL_ACCESS),
+    ("Accessibility", REL_ACCESS),
 ]
 REL_SORT_POPULAR = "http://opds-spec.org/sort/popular"
 
 
 def _group(facets, rel):
     """The facet group whose options carry ``rel``: a group is told by its
-    relation, since two share the title Access."""
+    relation, not its title."""
     return next((g for g in facets if any(has_rel(l, rel) for l in g["links"])), None)
 
 

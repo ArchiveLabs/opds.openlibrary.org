@@ -29,8 +29,7 @@ identity stays the query parameter and value in their href.
 
 `https://openlibrary.org/opds/rel/facet/availability`
 
-The group titled Access (the print-disability group is titled Access too,
-which is one reason to go by relation). Its options set `mode`: `everything`, the
+The group titled Access. Its options set `mode`: `everything`, the
 option with no `mode`, applies no availability filter; `ebooks` keeps books
 that can be borrowed or read for free; `open_access` keeps books free to read;
 `buyable`, on search pages only, keeps books that can be bought. Several
@@ -58,7 +57,7 @@ both.
 
 `https://openlibrary.org/opds/rel/facet/access`
 
-The group titled Access. Its options set `access`: `general`, the option
+The group titled Accessibility. Its options set `access`: `general`, the option
 with no `access`, hides print-disabled-only books; `print_disabled` shows
 only those.
 
