@@ -210,8 +210,16 @@ def _call_upstream(func, **kwargs):
             status_code=status_code,
         ) from exc
     except httpx.RequestError as exc:
-        logger.error("upstream request error: %s", exc)
-        raise UpstreamError(f"Could not reach OpenLibrary: {exc}") from exc
+        # The type, not just the message: some say nothing (a PoolTimeout's
+        # is empty), and the type is what tells a pool, a connect and a read
+        # timeout apart.
+        reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        try:
+            url = exc.request.url
+        except RuntimeError:  # an error raised outside a request carries none
+            url = None
+        logger.error("upstream request error %s url=%s", reason, url)
+        raise UpstreamError(f"Could not reach OpenLibrary: {reason}") from exc
 
 
 def _call_provider_compat(func, **kwargs):

@@ -753,6 +753,22 @@ class TestUpstreamErrors:
         with patch(SEARCH_PATCH_TARGET, side_effect=exc):
             resp = client.get("/search?query=test")
         assert resp.status_code == 502
+        assert resp.json()["detail"] == "Could not reach OpenLibrary: ConnectError: Connection refused"
+
+    def test_a_request_error_without_a_message_is_named_by_its_type(self, caplog):
+        _req = httpx.Request("GET", "https://openlibrary.org/search.json")
+        exc = httpx.PoolTimeout("", request=_req)
+        with patch(SEARCH_PATCH_TARGET, side_effect=exc), caplog.at_level("ERROR"):
+            resp = client.get("/search?query=test")
+        assert resp.status_code == 502
+        assert resp.json()["detail"] == "Could not reach OpenLibrary: PoolTimeout"
+        assert "upstream request error PoolTimeout url=https://openlibrary.org/search.json" in caplog.text
+
+    def test_a_request_error_without_a_request_still_logs(self):
+        with patch(SEARCH_PATCH_TARGET, side_effect=httpx.ReadTimeout("timed out")):
+            resp = client.get("/search?query=test")
+        assert resp.status_code == 502
+        assert resp.json()["detail"] == "Could not reach OpenLibrary: ReadTimeout: timed out"
 
 
 # ---------------------------------------------------------------------------
