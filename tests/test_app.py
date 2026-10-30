@@ -982,6 +982,61 @@ class HitCacheBackend(NullCacheBackend):
         return self._data
 
 
+class ValidatorCacheBackend(NullCacheBackend):
+    """Fetches through, and keeps the validator each call passed."""
+
+    def __init__(self):
+        self.validators: dict[str, object] = {}
+
+    async def cached_swr(self, key: str, fresh_ttl: int, stale_ttl: int, fetch, is_valid=None):
+        self.validators[key] = is_valid
+        return await fetch()
+
+
+class TestSearchCache:
+    def _search_calls(self, rec):
+        return [(k, t) for k, t in rec.cached_calls if k.startswith("opds:search:")]
+
+    def test_a_miss_fetches_and_is_cached_for_two_minutes(self, mock_empty_search):
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/search?query=dune&language=en")
+        assert mock_empty_search.called
+        [(_, ttl)] = self._search_calls(rec)
+        assert ttl == 120
+
+    def test_a_hit_skips_the_provider(self, mock_empty_search):
+        fake = {"metadata": {"title": "Cached"}, "links": [], "publications": []}
+        fastapi_app.dependency_overrides[get_cache] = lambda: HitCacheBackend(fake)
+        resp = client.get("/search?query=dune")
+        assert resp.status_code == 200
+        assert resp.json()["metadata"]["title"] == "Cached"
+        assert not mock_empty_search.called
+
+    @pytest.mark.parametrize("other", [
+        "query=dune&page=2", "query=dune&limit=40", "query=dune&language=fr",
+        "query=dune&mode=ebooks", "query=dune&media_type=audiobook",
+        "query=dune&access=print_disabled", "query=dune&sort=new", "query=dune&title=Dune",
+        "query=dun",
+    ])
+    def test_every_parameter_is_in_the_key(self, other, mock_empty_search):
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/search?query=dune")
+        client.get(f"/search?{other}")
+        [(first, _), (second, _)] = self._search_calls(rec)
+        assert first != second
+
+    def test_a_page_that_counts_results_and_lists_none_is_not_kept(self, mock_empty_search):
+        rec = ValidatorCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/search?query=dune")
+        [is_valid] = [v for k, v in rec.validators.items() if k.startswith("opds:search:")]
+        assert not is_valid({"metadata": {"numberOfItems": 12}, "publications": []})
+        assert is_valid({"metadata": {"numberOfItems": 12}, "publications": [{}]})
+        assert is_valid({"metadata": {"numberOfItems": 0}})
+
+
 class TestHomeCacheDevMode:
     def test_cache_miss_triggers_provider_and_stores(self, mock_empty_search):
         """On cache MISS, provider is called and result is passed through cached()."""

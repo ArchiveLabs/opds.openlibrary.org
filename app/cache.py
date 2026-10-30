@@ -33,6 +33,12 @@ TTL_LANG_OPTIONS_SECONDS    = 7 * 24 * 60 * 60   # 7 days
 # within a typical content-rotation cycle.
 TTL_LANG_COUNTS_SECONDS     = 7 * 24 * 60 * 60
 
+# A search's results: two minutes fresh is long enough for the reader's own
+# repeats (Back to the results, page 2, the same term typed again) to be one
+# Solr query, and short enough that a borrow elsewhere shows up soon.
+TTL_SEARCH_SECONDS          = 2 * 60
+TTL_SEARCH_STALE_SECONDS    = 30 * 60
+
 # Stale-while-revalidate window: after fresh_ttl elapses, served value is
 # returned immediately and a background refresh kicks off. stale_ttl caps how
 # long the stale value survives if no traffic triggers refresh.

@@ -50,6 +50,8 @@ from app.cache import (
     TTL_HOME_NONDEFAULT_SECONDS,
     TTL_LANG_COUNTS_SECONDS,
     TTL_LANG_OPTIONS_SECONDS,
+    TTL_SEARCH_SECONDS,
+    TTL_SEARCH_STALE_SECONDS,
     get_cache,
     make_key,
 )
@@ -412,6 +414,12 @@ async def opds_search(
     media_type = canonical_media_type(media_type)
     self_href = f"{base}/search?{request.url.query}" if request.url.query else f"{base}/search"
 
+    key = make_key("search", {
+        "base": base, "self": self_href, "query": query, "limit": limit, "page": page,
+        "sort": sort, "mode": mode, "title": title, "language": language,
+        "media_type": media_type, "access": access,
+    })
+
     async def _fetch_search():
         return await asyncio.to_thread(
             _search,
@@ -428,43 +436,56 @@ async def opds_search(
             access=access,
         )
 
-    # The language-facet fetch and the main search are independent, so run them
-    # concurrently. The facet call (languages.json) would otherwise be a serial
-    # ~0.7-1.5s tax in front of the search; overlapping them hides it entirely.
-    language_counts, search_response = await asyncio.gather(
-        _cached_language_counts(cache),
-        _fetch_search(),
-    )
+    async def _fetch_page() -> dict:
+        # The language-facet fetch and the main search are independent, so run them
+        # concurrently. The facet call (languages.json) would otherwise be a serial
+        # ~0.7-1.5s tax in front of the search; overlapping them hides it entirely.
+        language_counts, search_response = await asyncio.gather(
+            _cached_language_counts(cache),
+            _fetch_search(),
+        )
 
-    safe_total = _safe_total(getattr(search_response, "total", None))
-    if safe_total != getattr(search_response, "total", None):
-        logger.warning("search response returned invalid total=%r; defaulting to 0", getattr(search_response, "total", None))
-    search_response.total = safe_total
-    availability_counts: dict = {}
+        safe_total = _safe_total(getattr(search_response, "total", None))
+        if safe_total != getattr(search_response, "total", None):
+            logger.warning("search response returned invalid total=%r; defaulting to 0", getattr(search_response, "total", None))
+        search_response.total = safe_total
+        availability_counts: dict = {}
 
-    catalog = Catalog.create(
-        metadata=Metadata(title=title or "Search Results"),
-        response=search_response,
-        links=[
-            Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
-            *_common_links(base),
-        ],
-        facets=_call_provider_compat(
-            OpenLibraryDataProvider.build_facets,
-            base_url=base,
-            query=query,
-            sort=sort,
-            mode=mode,
-            language=language,
-            title=title,
-            total=safe_total,
-            availability_counts=availability_counts,
-            media_type=media_type,
-            access=access,
-            language_counts=language_counts,
-        ),
+        catalog = Catalog.create(
+            metadata=Metadata(title=title or "Search Results"),
+            response=search_response,
+            links=[
+                Link(rel="self", href=self_href, type=OPDS_MEDIA_TYPE),
+                *_common_links(base),
+            ],
+            facets=_call_provider_compat(
+                OpenLibraryDataProvider.build_facets,
+                base_url=base,
+                query=query,
+                sort=sort,
+                mode=mode,
+                language=language,
+                title=title,
+                total=safe_total,
+                availability_counts=availability_counts,
+                media_type=media_type,
+                access=access,
+                language_counts=language_counts,
+            ),
+        )
+        return catalog.model_dump()
+
+    # A page that says it has results and lists none is an upstream hiccup,
+    # not an answer: the same guard as the home page's, so it is never pinned.
+    def _search_is_valid(d: dict) -> bool:
+        total = (d.get("metadata") or {}).get("numberOfItems") or 0
+        return total == 0 or bool(d.get("publications"))
+
+    data = await cache.cached_swr(
+        key, TTL_SEARCH_SECONDS, TTL_SEARCH_STALE_SECONDS, _fetch_page,
+        is_valid=_search_is_valid,
     )
-    return opds_response(catalog.model_dump())
+    return opds_response(data)
 
 
 @router.get("/books/{edition_olid}", summary="OPDS 2.0 single edition")
