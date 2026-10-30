@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Literal, Optional
 import asyncio
 import re
@@ -590,6 +591,31 @@ def _author_page_href(
     return f"{path}?{urlencode(params)}" if params else path
 
 
+# The author routes are what crawlers walk: Sentry counted 430k upstream
+# errors on /authors/{olid}/books in a period with 18k full pools, which
+# reached readers as read timeouts on /search. A miss on either author route
+# holds one of these slots while it goes upstream, so an author crawl queues
+# behind itself and takes at most this many of the worker's connections to
+# Open Library (the shared client's 64) from everything else.
+AUTHOR_UPSTREAM_SLOTS = 8
+# How long a miss waits for a slot before it is answered 503, as a full pool is.
+AUTHOR_SLOT_WAIT_SECONDS = 10.0
+_author_slots = asyncio.Semaphore(AUTHOR_UPSTREAM_SLOTS)
+
+
+@asynccontextmanager
+async def _author_slot():
+    try:
+        await asyncio.wait_for(_author_slots.acquire(), AUTHOR_SLOT_WAIT_SECONDS)
+    except TimeoutError:
+        logger.warning("author upstream slots full; answering 503")
+        raise UpstreamBusy("Too many author pages being fetched; try again shortly") from None
+    try:
+        yield
+    finally:
+        _author_slots.release()
+
+
 def _all_books_title(author_name: Optional[str]) -> str:
     return f"All {author_name}'s books" if author_name else "All books"
 
@@ -663,10 +689,11 @@ async def opds_authors(
             return None
 
     async def _fetch_page() -> dict:
-        info_data, popular_response = await asyncio.gather(
-            cache.cached(info_key, TTL_AUTHOR_INFO_SECONDS, _fetch_info),
-            asyncio.to_thread(_fetch_popular),
-        )
+        async with _author_slot():
+            info_data, popular_response = await asyncio.gather(
+                cache.cached(info_key, TTL_AUTHOR_INFO_SECONDS, _fetch_info),
+                asyncio.to_thread(_fetch_popular),
+            )
         info = AuthorInfo(**info_data)
         # The feed carries both texts about the author: the one-line summary
         # Open Library shows under the portrait (the author's Wikidata
@@ -763,21 +790,22 @@ async def opds_author_books(
         return info._asdict()
 
     async def _fetch_catalog() -> dict:
-        info_data, search_response = await asyncio.gather(
-            cache.cached(info_key, TTL_AUTHOR_INFO_SECONDS, _fetch_info),
-            asyncio.to_thread(
-                _search, provider,
-                query=f"author_key:{olid}",
-                limit=limit,
-                offset=(page - 1) * limit,
-                sort=sort,
-                facets={"mode": mode},
-                language=language,
-                media_type=media_type,
-                require_cover=False,
-                access=access,
-            ),
-        )
+        async with _author_slot():
+            info_data, search_response = await asyncio.gather(
+                cache.cached(info_key, TTL_AUTHOR_INFO_SECONDS, _fetch_info),
+                asyncio.to_thread(
+                    _search, provider,
+                    query=f"author_key:{olid}",
+                    limit=limit,
+                    offset=(page - 1) * limit,
+                    sort=sort,
+                    facets={"mode": mode},
+                    language=language,
+                    media_type=media_type,
+                    require_cover=False,
+                    access=access,
+                ),
+            )
         info = AuthorInfo(**info_data)
 
         if not search_response.records and info.name is None and info.bio is None:

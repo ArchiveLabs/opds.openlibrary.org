@@ -1439,6 +1439,20 @@ class TestAuthorPage:
         assert mock_search.call_count == 1
         assert mock_search.call_args.kwargs["sort"] == "rating"
 
+    @pytest.mark.parametrize("path", ["/authors/OL31353A", "/authors/OL31353A/books"])
+    def test_a_miss_with_every_author_slot_held_is_503(self, path, monkeypatch):
+        import asyncio
+        monkeypatch.setattr(opds_module, "_author_slots", asyncio.Semaphore(0))
+        monkeypatch.setattr(opds_module, "AUTHOR_SLOT_WAIT_SECONDS", 0.01)
+        resp, mock_search = self._get(path)
+        assert resp.status_code == 503
+        assert resp.headers["Retry-After"] == "5"
+        assert not mock_search.called
+
+    def test_author_routes_cache_for_a_day(self):
+        from app import cache as cache_module
+        assert cache_module.TTL_AUTHOR_CATALOG_SECONDS == 24 * 60 * 60
+
     def test_navigation_entry_to_all_the_authors_books(self):
         resp, _ = self._get("/authors/OL31353A")
         [entry] = resp.json()["navigation"]
