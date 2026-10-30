@@ -93,7 +93,7 @@ def _base_url(request: Request) -> str:
 def _common_links(base: str) -> list[Link]:
     """Links shared across catalog responses (search template, shelf, profile)."""
     return [
-        Link(rel="search", href=f"{base}/search{{?query,language,mode,media_type}}", type=OPDS_MEDIA_TYPE, templated=True),
+        Link(rel="search", href=f"{base}/search{{?query,language,mode,media_type,limit}}", type=OPDS_MEDIA_TYPE, templated=True),
         Link(rel="http://opds-spec.org/shelf",
              href="https://archive.org/services/loans/loan/?action=user_bookshelf",
              type=OPDS_MEDIA_TYPE),

@@ -2660,12 +2660,12 @@ class TestLanguageList:
         for rel in ("self", "first", "previous"):
             assert "language=en,fr" in by_rel[rel], rel
 
-    def test_search_template_takes_the_languages(self, mock_empty_search):
+    def test_search_template_takes_the_languages_and_a_page_size(self, mock_empty_search):
         with patch(FETCH_AUTHOR_INFO_PATCH_TARGET, return_value=_author_info("Author", None)):
             for path in ("/search?query=x", "/authors/OL1234A"):
                 data = client.get(path).json()
                 search = next(l for l in data["links"] if l.get("rel") == "search")
-                assert search["href"].endswith("/search{?query,language,mode,media_type}"), path
+                assert search["href"].endswith("/search{?query,language,mode,media_type,limit}"), path
                 assert search["templated"] is True, path
 
 
