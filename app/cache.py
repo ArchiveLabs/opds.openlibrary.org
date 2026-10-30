@@ -19,8 +19,11 @@ logger = get_logger(__name__)
 # TTL constants (module-level — pure data)
 # ---------------------------------------------------------------------------
 
-TTL_HOME_DEFAULT_SECONDS    = 1 * 60
-TTL_HOME_NONDEFAULT_SECONDS = 1 * 60
+# Ten minutes: Trending is an hourly sum, and nothing on the front page moves
+# faster than that. The warmer (app/routes/opds.py) re-renders the pages
+# readers asked for every eight, so a page read once a day stays warm.
+TTL_HOME_DEFAULT_SECONDS    = 10 * 60
+TTL_HOME_NONDEFAULT_SECONDS = 10 * 60
 TTL_BOOK_SECONDS            = 6 * 60 * 60
 TTL_AUTHOR_INFO_SECONDS     = 24 * 60 * 60
 # A day: an author's list moves slowly, and the author routes are what
@@ -98,6 +101,17 @@ class CacheBackend(Protocol):
         is_valid: Callable[[dict], bool] | None = None,
     ) -> dict: ...
 
+    async def refresh_swr(
+        self,
+        key: str,
+        fresh_ttl: int,
+        stale_ttl: int,
+        fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
+    ) -> None: ...
+
+    def claim(self, name: str, seconds: int) -> bool: ...
+
 
 # ---------------------------------------------------------------------------
 # NullCacheBackend — no-op, used when CACHE_ENABLED=false or in tests
@@ -130,6 +144,19 @@ class NullCacheBackend:
         is_valid: Callable[[dict], bool] | None = None,
     ) -> dict:
         return await fetch()
+
+    async def refresh_swr(
+        self,
+        key: str,
+        fresh_ttl: int,
+        stale_ttl: int,
+        fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
+    ) -> None:
+        return
+
+    def claim(self, name: str, seconds: int) -> bool:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +454,28 @@ class MemcachedBackend:
         except Exception as exc:
             logger.warning("cache swr failed key=%s: %s — fetching uncached", key, exc)
             return await fetch()
+
+
+    async def refresh_swr(
+        self,
+        key: str,
+        fresh_ttl: int,
+        stale_ttl: int,
+        fetch: Callable[[], Coroutine[Any, Any, dict]],
+        is_valid: Callable[[dict], bool] | None = None,
+    ) -> None:
+        """Fetch and store now, however fresh the entry is: a warmer's door
+        into ``cached_swr``'s entries. Skipped while a refresh of the key is
+        already running in this worker or another."""
+        if key in self._refreshing:
+            return
+        self._refreshing.add(key)
+        await self._refresh_in_background(key, fresh_ttl, stale_ttl, fetch, is_valid)
+
+    def claim(self, name: str, seconds: int) -> bool:
+        """True for the one caller across every worker that gets ``name``
+        for ``seconds``; the claim is not released, it lapses."""
+        return self._acquire_distributed_lock(f"opds:claim:{name}", expire=seconds)
 
 
 # ---------------------------------------------------------------------------

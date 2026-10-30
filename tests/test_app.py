@@ -993,6 +993,82 @@ class ValidatorCacheBackend(NullCacheBackend):
         return await fetch()
 
 
+class StoreCacheBackend(NullCacheBackend):
+    """A dict for get/set; records what the warmer refreshes."""
+
+    def __init__(self):
+        self.store: dict[str, dict] = {}
+        self.refreshed: list[tuple[str, int]] = []
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value, ttl):
+        self.store[key] = value
+
+    async def refresh_swr(self, key, fresh_ttl, stale_ttl, fetch, is_valid=None):
+        self.refreshed.append((key, fresh_ttl))
+        await fetch()
+
+
+class TestHomeWarmer:
+    @pytest.fixture(autouse=True)
+    def _fresh_worker(self, monkeypatch):
+        monkeypatch.setattr(opds_module, "_home_seen_here", {})
+
+    def _pass(self, store):
+        import asyncio
+        return asyncio.run(opds_module.warm_home_pages(store))
+
+    def test_the_front_page_is_fresh_for_ten_minutes(self):
+        from app import cache as cache_module
+        assert cache_module.TTL_HOME_DEFAULT_SECONDS == 600
+        assert cache_module.TTL_HOME_NONDEFAULT_SECONDS == 600
+        assert opds_module.HOME_WARM_INTERVAL_SECONDS < 600
+
+    def test_a_pass_re_renders_each_page_asked_for_under_its_own_key(self, mock_empty_search):
+        store = StoreCacheBackend()
+        rec = RecordingCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: rec
+        client.get("/?language=en,sv")
+        client.get("/?language=fr&media_type=audiobook")
+        [*served] = [k for k, _ in rec.cached_calls if k.startswith("opds:home:")]
+
+        opds_module._home_seen_here.clear()
+        fastapi_app.dependency_overrides[get_cache] = lambda: store
+        client.get("/?language=en,sv")
+        client.get("/?language=fr&media_type=audiobook")
+        assert self._pass(store) == 2
+        assert sorted(k for k, _ in store.refreshed) == sorted(served)
+        assert all(ttl == 600 for _, ttl in store.refreshed)
+
+    def test_the_same_page_is_one_entry(self, mock_empty_search):
+        store = StoreCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: store
+        client.get("/?language=en,sv")
+        client.get("/?language=en%2Csv")
+        assert len(store.store[opds_module.HOME_SEEN_KEY]) == 1
+
+    def test_a_page_not_asked_for_in_a_day_is_left_cold(self):
+        import json, time
+        store = StoreCacheBackend()
+        params = {"base": "http://testserver", "mode": "everything", "language": "en", "page": 1,
+                  "media_type": None, "access": None, "limit": 0}
+        store.store[opds_module.HOME_SEEN_KEY] = {json.dumps(params, sort_keys=True): time.time() - 25 * 3600}
+        assert self._pass(store) == 0
+
+    def test_only_the_most_recent_are_kept(self, mock_empty_search):
+        store = StoreCacheBackend()
+        fastapi_app.dependency_overrides[get_cache] = lambda: store
+        for page in range(1, opds_module.HOME_WARM_MAX + 6):
+            client.get(f"/?page={page}")
+        seen = store.store[opds_module.HOME_SEEN_KEY]
+        assert len(seen) == opds_module.HOME_WARM_MAX
+
+    def test_nothing_recorded_nothing_warmed(self):
+        assert self._pass(StoreCacheBackend()) == 0
+
+
 class TestSearchCache:
     def _search_calls(self, rec):
         return [(k, t) for k, t in rec.cached_calls if k.startswith("opds:search:")]

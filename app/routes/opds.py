@@ -3,7 +3,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
 import asyncio
+import json
 import re
+import time
 import inspect
 
 import httpx
@@ -312,50 +314,36 @@ except ImportError:
     _OL_GROUP_DESCRIPTIONS: dict = {}
 
 
-@router.get("/", summary="OPDS 2.0 homepage")
-async def opds_home(
-    request: Request,
-    mode: str = Query(default="everything", description="Availability filter: everything, or a comma-separated list of ebooks, open_access, buyable, print_disabled (any of them)."),
-    language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
-    page: int = Query(default=1, ge=1, description="Group page (each page loads a batch of carousels)"),
-    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
-    access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
-    limit: int = Query(default=0, ge=0, le=100, description="Per-carousel publication count (0 = language default: 25 EN / 100 non-EN)."),
-    cache: CacheBackend = Depends(get_cache),
-):
-    logger.info("GET / client=%s language=%s page=%s media_type=%s access=%s limit=%s", request.client, language, page, media_type, access, limit)
-    base = _base_url(request)
-    provider = get_provider(base)
-    # One spelling of each list, so the cache key and every href agree.
-    language = canonical_language(language)
-    mode = canonical_mode(mode)
-    media_type = canonical_media_type(media_type)
-
-    is_default = mode == "everything" and language is None and page == 1 and media_type is None and access is None
+def _home_job(cache: CacheBackend, params: dict):
+    """The cache key, fresh TTL, fetch and validator of one front page, by
+    the parameters it was asked with (canonical spellings): what the route
+    serves and what the warmer re-renders."""
+    is_default = (
+        params["mode"] == "everything" and params["language"] is None and params["page"] == 1
+        and params["media_type"] is None and params["access"] is None
+    )
     ttl = TTL_HOME_DEFAULT_SECONDS if is_default else TTL_HOME_NONDEFAULT_SECONDS
-
     # Each page cached separately — page is included in the key.
-    home_key = make_key("home", {
-        "base": base, "mode": mode, "language": language,
-        "page": page, "media_type": media_type, "access": access,
-        "limit": limit,
-    })
-    # Language facet counts are global (see _cached_language_counts) and shared
-    # service-wide, so paging or switching mode/media_type/access never re-fetches.
-    language_counts = await _cached_language_counts(cache)
+    home_key = make_key("home", params)
 
     async def _fetch_full() -> dict:
+        # Language facet counts are global (see _cached_language_counts) and
+        # shared service-wide, so paging or switching mode/media_type/access
+        # never re-fetches. The groups are chosen by them, so they come first;
+        # a cached page never waits on them.
+        language_counts = await _cached_language_counts(cache)
+        get_provider(params["base"])
         data = await asyncio.to_thread(
             _call_provider_compat,
             OpenLibraryDataProvider.build_home_feed,
-            base=base,
-            mode=mode,
-            language=language,
-            page=page,
-            media_type=media_type,
-            access=access,
+            base=params["base"],
+            mode=params["mode"],
+            language=params["language"],
+            page=params["page"],
+            media_type=params["media_type"],
+            access=params["access"],
             language_counts=language_counts,
-            limit=limit,
+            limit=params["limit"],
         )
         # Refresh language options in Memcached while we have fresh in-process data.
         if _ol_module._languages_map_cache:
@@ -371,13 +359,95 @@ async def opds_home(
     def _home_is_valid(d: dict) -> bool:
         return bool(d.get("groups"))
 
+    return home_key, ttl, _fetch_full, _home_is_valid
+
+
+# The front pages readers asked for in the last day, for the warmer: one
+# memcached entry, {canonical params as JSON: when last asked}, shared by the
+# workers. A worker writes a combination at most once per HOME_SEEN_REWRITE
+# so a busy front page costs no write per request.
+HOME_SEEN_KEY = "opds:home_seen"
+HOME_SEEN_WINDOW_SECONDS = 24 * 60 * 60
+HOME_SEEN_REWRITE_SECONDS = 10 * 60
+# At most this many are kept warm, the most recently asked for. A cold render
+# is about 28 Open Library calls, so this bounds the warmer's load upstream.
+HOME_WARM_MAX = 20
+# Under the fresh TTL, so a page the warmer keeps is never stale when read.
+HOME_WARM_INTERVAL_SECONDS = 8 * 60
+_home_seen_here: dict[str, float] = {}
+
+
+def _note_home_seen(cache: CacheBackend, params: dict) -> None:
+    combo = json.dumps(params, sort_keys=True)
+    now = time.time()
+    if now - _home_seen_here.get(combo, 0) < HOME_SEEN_REWRITE_SECONDS:
+        return
+    if len(_home_seen_here) > 10 * HOME_WARM_MAX:
+        _home_seen_here.clear()
+    _home_seen_here[combo] = now
+    seen = cache.get(HOME_SEEN_KEY) or {}
+    seen[combo] = now
+    recent = sorted(
+        ((c, t) for c, t in seen.items() if now - t < HOME_SEEN_WINDOW_SECONDS),
+        key=lambda item: item[1], reverse=True,
+    )[:HOME_WARM_MAX]
+    cache.set(HOME_SEEN_KEY, dict(recent), HOME_SEEN_WINDOW_SECONDS)
+
+
+async def warm_home_pages(cache: CacheBackend) -> int:
+    """One pass of the warmer: re-render every front page asked for in the
+    last day, one after another. Returns how many it rendered."""
+    seen = cache.get(HOME_SEEN_KEY) or {}
+    now = time.time()
+    warmed = 0
+    for combo, asked in seen.items():
+        if now - asked >= HOME_SEEN_WINDOW_SECONDS:
+            continue
+        key, ttl, fetch, is_valid = _home_job(cache, json.loads(combo))
+        await cache.refresh_swr(key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, fetch, is_valid)
+        warmed += 1
+    return warmed
+
+
+async def home_warmer(cache: CacheBackend) -> None:
+    """Keeps the front pages readers ask for rendered, so the first reader
+    after a quiet spell never pays the cold render (6-16 s for a language
+    list other than the default). One worker runs each pass."""
+    while True:
+        await asyncio.sleep(HOME_WARM_INTERVAL_SECONDS)
+        try:
+            if cache.claim("home_warm", HOME_WARM_INTERVAL_SECONDS - 30):
+                warmed = await warm_home_pages(cache)
+                logger.info("home warmer re-rendered %d front pages", warmed)
+        except Exception as exc:
+            logger.warning("home warmer pass failed: %s", exc)
+
+
+@router.get("/", summary="OPDS 2.0 homepage")
+async def opds_home(
+    request: Request,
+    mode: str = Query(default="everything", description="Availability filter: everything, or a comma-separated list of ebooks, open_access, buyable, print_disabled (any of them)."),
+    language: Optional[str] = Query(default=None, description="Comma-separated ISO 639-1 language filter, the preferred one first (e.g. 'en' or 'en,fr'). Omit for all languages."),
+    page: int = Query(default=1, ge=1, description="Group page (each page loads a batch of carousels)"),
+    media_type: Optional[str] = Query(default=None, description="Media type filter: ebook, audiobook, or both comma-separated. Omit for all."),
+    access: Optional[str] = Query(default=None, description="Access filter: general (default), print_disabled."),
+    limit: int = Query(default=0, ge=0, le=100, description="Per-carousel publication count (0 = language default: 25 EN / 100 non-EN)."),
+    cache: CacheBackend = Depends(get_cache),
+):
+    logger.info("GET / client=%s language=%s page=%s media_type=%s access=%s limit=%s", request.client, language, page, media_type, access, limit)
+    # One spelling of each list, so the cache key and every href agree.
+    params = {
+        "base": _base_url(request), "mode": canonical_mode(mode), "language": canonical_language(language),
+        "page": page, "media_type": canonical_media_type(media_type), "access": access,
+        "limit": limit,
+    }
+    key, ttl, fetch, is_valid = _home_job(cache, params)
+    _note_home_seen(cache, params)
+
     # Full page served via stale-while-revalidate. Cold OL Solr hits cost
     # 30–40 s; serving the stale copy and refreshing in the background keeps
     # language/mode/facet switches snappy after the first hit.
-    data = await cache.cached_swr(
-        home_key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, _fetch_full,
-        is_valid=_home_is_valid,
-    )
+    data = await cache.cached_swr(key, ttl, TTL_HOME_DEFAULT_STALE_SECONDS, fetch, is_valid=is_valid)
     return opds_response(data)
 
 

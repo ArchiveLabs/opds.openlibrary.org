@@ -15,10 +15,10 @@ from app.cache import get_cache, LANG_OPTIONS_KEY, TTL_LANG_OPTIONS_SECONDS
 from app.exceptions import AuthorNotFound, EditionNotFound, UpstreamBusy, UpstreamError, WorkNotFound
 from app.logger import get_logger
 from app.routes.icloud import router as icloud_router
-from app.routes.opds import router as opds_router
+from app.routes.opds import home_warmer, router as opds_router
 from app.routes.rel import router as rel_router
 from app.sentry import init_sentry
-from app.config import CORS_ENABLED, ENVIRONMENT
+from app.config import CACHE_ENABLED, CORS_ENABLED, ENVIRONMENT
 
 logger = get_logger(__name__)
 
@@ -62,7 +62,12 @@ async def lifespan(_: FastAPI):
         # rather than on the first author page.
         await asyncio.to_thread(author_descriptions.size)
         await asyncio.to_thread(_warm_language_cache)
+    warmer = None
+    if ENVIRONMENT != "test" and CACHE_ENABLED:
+        warmer = asyncio.create_task(home_warmer(get_cache()))
     yield
+    if warmer is not None:
+        warmer.cancel()
 
 
 app = FastAPI(
