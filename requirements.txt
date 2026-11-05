@@ -2,7 +2,7 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 python-dotenv>=1.0.0
 git+https://github.com/ArchiveLabs/pyopds2.git@012aceb76b150ee379c4de03e612a2358333c294
-git+https://github.com/ArchiveLabs/pyopds2_openlibrary.git@134b3471c0f9684d11299e7df8420f329410792d
+git+https://github.com/ArchiveLabs/pyopds2_openlibrary.git@60383a59b6e657a126e77ff098dd0e99112a38ed
 httpx>=0.27.0
 markdown-it-py>=3.0.0
 sentry-sdk[fastapi]>=2.0.0
