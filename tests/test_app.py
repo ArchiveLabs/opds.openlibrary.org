@@ -152,6 +152,12 @@ class TestOpdsHome:
         for subject in OpenLibraryDataProvider.FEATURED_SUBJECTS:
             assert subject["presentable_name"] in nav_titles
 
+    def test_each_genre_names_its_icon(self, mock_single_record):
+        data = client.get("/").json()
+        icons = {n["title"]: n.get("properties", {}).get("icon") for n in data["navigation"]}
+        for subject in OpenLibraryDataProvider.FEATURED_SUBJECTS:
+            assert icons[subject["presentable_name"]] == subject["icon"]
+
     def test_groups_present(self, mock_single_record):
         """Page 1 returns first batch of groups (GROUPS_PER_PAGE=3)."""
         data = client.get("/").json()
