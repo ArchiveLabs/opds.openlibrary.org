@@ -29,6 +29,8 @@ TTL_AUTHOR_INFO_SECONDS     = 24 * 60 * 60
 # A day: an author's list moves slowly, and the author routes are what
 # crawlers walk, so every hour they are not cached is a crawl upstream.
 TTL_AUTHOR_CATALOG_SECONDS  = 24 * 60 * 60
+# A genre's authors (/genres/authors): who its readers read moves slowly.
+TTL_GENRE_AUTHORS_SECONDS   = 24 * 60 * 60
 TTL_LANG_OPTIONS_SECONDS    = 7 * 24 * 60 * 60   # 7 days
 # Language facet counts (ebook_edition_count per language) come from
 # ``languages.json`` and change glacially — at most a few new languages or

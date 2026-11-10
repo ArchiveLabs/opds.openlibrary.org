@@ -128,6 +128,27 @@ type `image/jpeg` and with no size. It is addressed by the author's id, so
 a search result pictures its authors without a request per author, and
 answers 404 for an author with no photo rather than a blank image.
 
+## Genres
+
+The front page's navigation is the catalogue's genres, one link each to the
+genre's feed. Each link's `properties` say its `code` (`fantasy`), the
+genre's own name, and the `icon` a client draws it with.
+
+### genre/authors
+
+`https://openlibrary.org/opds/rel/genre/authors`
+
+On the front page, a templated link to the authors the readers of some
+genres read: `/genres/authors{?genre,language}`, where `genre` is one or
+more genre codes, comma-separated, and `language` the reader's languages as
+everywhere else. It answers a feed whose `navigation` is one entry per
+author, `rel="author"`, linking the author's page, with the author's
+portrait in `properties.portrait` (a link of the `portrait` relation, which
+answers 404 for an author with no photo). They are the authors of each
+genre's most-read books that can be had, ranked by the reading-log entries
+of their books there, the genres taken in turn, twelve unless `limit` says
+otherwise. What a client offers a new reader to follow.
+
 ## Subject schemes
 
 A publication's `metadata.subject` is a list of subject objects
@@ -142,8 +163,8 @@ One is not.
 
 The subject whose `scheme` is this URL is the work's genre: the one of the
 catalogue's genres (the front page's navigation) that the most of its
-subjects name. It comes first in the list, its `code` is the genre's key
-(`science_fiction`), and its link is that genre's feed, the same one the
+subjects name. It comes first in the list, its `code` is the genre's code
+(`sci-fi`), the one the front page's genre link says, and its link is that genre's feed, the same one the
 work's "Popular in" related feed points at. A work in no genre has no such
 subject. Not a link relation, but coined here all the same, so that the
 scheme a client finds can be opened.

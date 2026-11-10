@@ -39,6 +39,7 @@ Interactive docs: `/docs` (Swagger UI) · `/redoc`
 | `GET /search` | `query`, `limit`, `page`, `sort`, `mode`, `title`, `language`, `media_type`, `access` |
 | `GET /authors/{olid}` | `mode`, `language`, `media_type`, `access`: the page about an author |
 | `GET /authors/{olid}/books` | `page`, `limit`, `mode`, `language`, `media_type`, `access`, `sort`: all their books |
+| `GET /genres/authors` | `genre` (comma-separated genre codes), `language`, `limit`: the authors the genres' readers read, for a new reader to follow |
 | `GET /works/{olid}` | `language`, `access`: the work, its editions as `rel=alternate` publications, best offer first |
 | `GET /books/{olid}` | none: one edition, the document a work's alternate points at when the Archive does not hold it |
 | `GET /rel/{relation}` | none: the HTML page a link relation the feed coins resolves to |

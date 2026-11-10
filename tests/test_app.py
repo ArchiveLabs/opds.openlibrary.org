@@ -158,6 +158,17 @@ class TestOpdsHome:
         for subject in OpenLibraryDataProvider.FEATURED_SUBJECTS:
             assert icons[subject["presentable_name"]] == subject["icon"]
 
+    def test_each_genre_names_its_code(self, mock_single_record):
+        data = client.get("/").json()
+        codes = [n.get("properties", {}).get("code") for n in data["navigation"]]
+        assert codes == [s["code"] for s in OpenLibraryDataProvider.FEATURED_SUBJECTS]
+
+    def test_it_links_the_genres_authors_by_a_template(self, mock_single_record):
+        data = client.get("/").json()
+        [link] = [l for l in data["links"] if l["rel"] == "https://openlibrary.org/opds/rel/genre/authors"]
+        assert link["href"].endswith("/genres/authors{?genre,language}")
+        assert link["templated"] is True
+
     def test_groups_present(self, mock_single_record):
         """Page 1 returns first batch of groups (GROUPS_PER_PAGE=3)."""
         data = client.get("/").json()
@@ -2812,9 +2823,86 @@ class TestRelRoute:
     def test_a_trailing_slash_still_resolves(self):
         assert client.get("/rel/facet/access/").status_code == 200
 
+    def test_the_genre_authors_rel_resolves(self):
+        r = client.get("/rel/genre/authors")
+        assert r.status_code == 200
+        assert 'id="genre-authors"' in r.text
+
     def test_the_genre_scheme_resolves_too(self):
         from pyopds2_openlibrary import SCHEME_GENRE
 
         r = client.get(SCHEME_GENRE.removeprefix("https://openlibrary.org/opds"))
         assert r.status_code == 200
         assert 'id="genre"' in r.text
+
+
+# ---------------------------------------------------------------------------
+# /genres/authors
+# ---------------------------------------------------------------------------
+
+FETCH_GENRE_AUTHORS_PATCH_TARGET = "app.routes.opds.fetch_genre_authors"
+
+
+class TestGenreAuthors:
+    @staticmethod
+    def _authors(prefix, n):
+        from pyopds2_openlibrary import GenreAuthor
+        return [GenreAuthor(f"OL{prefix}{i}A", f"{prefix}{i}", 100 - i, 2) for i in range(n)]
+
+    def _get(self, path, by_genre):
+        def fake(subject, language=None):
+            return by_genre[subject["code"]]
+        with patch(FETCH_GENRE_AUTHORS_PATCH_TARGET, side_effect=fake) as mock_fetch:
+            resp = client.get(path)
+        return resp, mock_fetch
+
+    def test_each_author_is_a_link_to_their_page_with_a_portrait(self):
+        resp, _ = self._get("/genres/authors?genre=fantasy", {"fantasy": self._authors("1", 2)})
+        assert resp.status_code == 200
+        assert "application/opds+json" in resp.headers["content-type"]
+        first = resp.json()["navigation"][0]
+        assert first["title"] == "10"
+        assert first["rel"] == "author"
+        assert first["href"].endswith("/authors/OL10A")
+        assert first["properties"]["portrait"] == {
+            "href": "https://covers.openlibrary.org/a/olid/OL10A-L.jpg?default=false",
+            "type": "image/jpeg",
+            "rel": "https://openlibrary.org/opds/rel/portrait",
+        }
+
+    def test_the_genres_are_taken_in_turn_and_cut_at_twelve(self):
+        resp, _ = self._get(
+            "/genres/authors?genre=fantasy,crime",
+            {"fantasy": self._authors("1", 10), "crime": self._authors("2", 10)},
+        )
+        titles = [n["title"] for n in resp.json()["navigation"]]
+        assert titles[:4] == ["10", "20", "11", "21"]
+        assert len(titles) == 12
+
+    def test_the_languages_reach_the_search_and_the_author_pages(self):
+        resp, mock_fetch = self._get("/genres/authors?genre=romance&language=EN,fr", {"romance": self._authors("1", 1)})
+        assert mock_fetch.call_args.kwargs["language"] == "en,fr"
+        assert resp.json()["navigation"][0]["href"].endswith("/authors/OL10A?language=en%2Cfr")
+        [self_link] = [l for l in resp.json()["links"] if l["rel"] == "self"]
+        assert self_link["href"].endswith("/genres/authors?genre=romance&language=en%2Cfr")
+
+    def test_an_unknown_genre_is_400(self):
+        resp, mock_fetch = self._get("/genres/authors?genre=fantasy,westerns", {"fantasy": []})
+        assert resp.status_code == 400
+        assert not mock_fetch.called
+
+    def test_no_genre_is_an_error(self):
+        assert client.get("/genres/authors").status_code == 422
+        assert client.get("/genres/authors?genre=").status_code == 400
+
+    def test_a_genre_with_no_authors_answers_none(self):
+        resp, _ = self._get("/genres/authors?genre=cookbooks", {"cookbooks": []})
+        assert resp.status_code == 200
+        assert resp.json().get("navigation", []) == []
+
+    def test_an_upstream_failure_is_answered_as_one(self):
+        request = httpx.Request("GET", "https://openlibrary.org/search.json")
+        error = httpx.HTTPStatusError("boom", request=request, response=httpx.Response(500, request=request))
+        with patch(FETCH_GENRE_AUTHORS_PATCH_TARGET, side_effect=error):
+            resp = client.get("/genres/authors?genre=fantasy")
+        assert resp.status_code >= 500

@@ -11,16 +11,22 @@ import inspect
 import httpx
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Path, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from pyopds2 import Catalog, Link, Metadata, Navigation
 from pyopds2_openlibrary import (
     AuthorInfo,
+    GenreAuthor,
+    GenreNavigation,
     OpenLibraryDataProvider,
     REL_SORT_POPULAR,
     author_photo_links,
+    author_portrait_link,
+    featured_genre,
     fetch_author_info,
+    fetch_genre_authors,
+    interleave_genre_authors,
 )
 
 import pyopds2_openlibrary as _ol_module
@@ -45,6 +51,7 @@ from app.cache import (
     CacheBackend,
     LANG_OPTIONS_KEY,
     TTL_AUTHOR_INFO_SECONDS,
+    TTL_GENRE_AUTHORS_SECONDS,
     TTL_AUTHOR_CATALOG_SECONDS,
     TTL_BOOK_SECONDS,
     TTL_HOME_DEFAULT_SECONDS,
@@ -727,6 +734,70 @@ _FILTER_DOCS = {
     "media_type": "Media type filter: ebook, audiobook, or both comma-separated. Omit for all.",
     "access": "Access filter: general (default), print_disabled.",
 }
+
+
+GENRE_AUTHORS_LIMIT = 12
+
+
+@router.get("/genres/authors", summary="OPDS 2.0 feed of the authors a genre's readers read")
+async def opds_genre_authors(
+    request: Request,
+    genre: str = Query(..., description="Comma-separated genre codes, as the front page's genres name themselves (properties.code)."),
+    language: Optional[str] = Query(default=None, description=_FILTER_DOCS["language"]),
+    limit: int = Query(default=GENRE_AUTHORS_LIMIT, ge=1, le=50, description="How many authors."),
+    cache: CacheBackend = Depends(get_cache),
+):
+    """The authors the readers of the given genres read, most read first and
+    the genres taken in turn: what a client offers a new reader to follow.
+    Each is a navigation entry to the author's page, with their portrait in
+    ``properties`` (which answers 404 for an author with no photo). The
+    front page links here by a template (``REL_GENRE_AUTHORS``)."""
+    logger.info("GET /genres/authors genre=%s language=%s limit=%s", genre, language, limit)
+    base = _base_url(request)
+    language = canonical_language(language)
+    codes = list(dict.fromkeys(c.strip() for c in genre.split(",") if c.strip()))
+    subjects = [featured_genre(c) for c in codes]
+    unknown = [c for c, s in zip(codes, subjects) if s is None]
+    if not codes or unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown genre: {', '.join(unknown) or genre!r}")
+
+    async def _one(code: str, subject: dict) -> list[GenreAuthor]:
+        key = make_key("genre_authors", {"genre": code, "language": language})
+
+        async def _fetch() -> dict:
+            async with _author_slot():
+                authors = await asyncio.to_thread(
+                    _call_upstream, fetch_genre_authors, subject=subject, language=language,
+                )
+            return {"authors": [a._asdict() for a in authors]}
+
+        data = await cache.cached(key, TTL_GENRE_AUTHORS_SECONDS, _fetch)
+        return [GenreAuthor(**a) for a in data["authors"]]
+
+    lists = await asyncio.gather(*(_one(c, s) for c, s in zip(codes, subjects)))
+    authors = interleave_genre_authors(list(lists), limit)
+    self_params = {"genre": ",".join(codes), **({"language": language} if language else {})}
+    if limit != GENRE_AUTHORS_LIMIT:
+        self_params["limit"] = str(limit)
+    catalog = Catalog(
+        metadata=Metadata(title="Authors"),
+        links=[
+            Link(rel="self", href=f"{base}/genres/authors?{urlencode(self_params)}", type=OPDS_MEDIA_TYPE),
+            *_common_links(base),
+        ],
+        navigation=[
+            GenreNavigation(
+                href=_author_page_href(base, a.key, language=language),
+                title=a.name,
+                type=OPDS_MEDIA_TYPE,
+                rel="author",
+                properties={"portrait": author_portrait_link(a.key).model_dump(exclude_none=True)},
+            )
+            for a in authors
+        ],
+        publications=[],
+    )
+    return opds_response(catalog.model_dump())
 
 
 @router.get("/authors/{olid}", summary="OPDS 2.0 author page")

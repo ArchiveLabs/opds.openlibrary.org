@@ -18,6 +18,7 @@ matches nothing.
 | Single Edition | GET | `^/books/OL[0-9]+M$` |
 | Work (its editions) | GET | `^/works/OL[0-9]+W(\?.*)?$` — until it is live, works are served at `/search?work=OL…W` (see `_works_via_search` in `app/routes/opds.py`) |
 | Author Catalog | GET | `^/authors/OL[0-9]+A(\?.*)?$` |
+| A genre's authors | GET | `^/genres/authors(\?.*)?$` |
 | Link relation docs | GET | `^/rel(/[a-z0-9/-]*)?$` |
 | Health Check | GET | `^/health$` |
 | Service Worker | GET | `^/sw\.js$` |
@@ -27,7 +28,7 @@ matches nothing.
 ## Combined Allow-List
 
 ```
-^/(\?.*|search(\?.*)?|books/OL[0-9]+M|works/OL[0-9]+W(\?.*)?|authors/OL[0-9]+A(\?.*)?|rel(/[a-z0-9/-]*)?|health|sw\.js|icloud/asset(\?.*)?|icloud/relay-status)?$
+^/(\?.*|search(\?.*)?|books/OL[0-9]+M|works/OL[0-9]+W(\?.*)?|authors/OL[0-9]+A(\?.*)?|genres/authors(\?.*)?|rel(/[a-z0-9/-]*)?|health|sw\.js|icloud/asset(\?.*)?|icloud/relay-status)?$
 ```
 
 ## Notes
@@ -37,6 +38,7 @@ matches nothing.
 - **Homepage query params**: `/` takes `mode`, `language`, `page`, `media_type`, `access` and `limit`, and the feed itself links to `/?language=…`, `/?access=…` and `/?page=…` — a homepage pattern without `(\?.*)?` blocks the service's own facet and pagination links
 - **`language` is a list**: `language=en,fr,de` (URL-encoded `en%2Cfr%2Cde`), comma-separated ISO 639-1 codes, on `/`, `/search` and `/authors/{olid}` — the WAF must not treat the commas as anything
 - **`mode` and `media_type` are lists too**: `mode=ebooks,open_access`, `media_type=ebook,audiobook` (commas URL-encoded as `%2C` in the links the feed emits), on the same three endpoints
+- **Genre authors query params**: `/genres/authors` takes `genre` (comma-separated codes such as `fantasy,sci-fi`), `language` and `limit`
 - **Author query params**: `/authors/{olid}` takes `page`, `limit`, `mode`, `language`, `media_type` and `access`
 - **Search query params**: `/search` query parameters contain Solr syntax (`[]`, `*`, `:`, spaces) — the WAF must not block these as injection attempts
 - **Link relation docs**: `/rel/…` serves HTML, not OPDS JSON — the page a `rel` such as `https://openlibrary.org/opds/rel/facet/availability` resolves to. GET only, no query parameters
